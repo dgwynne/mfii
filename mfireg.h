@@ -338,7 +338,6 @@ struct mfi_frame_header {
 union mfi_sgl_frame {
 	struct mfi_sg32		sge32[8];
 	struct mfi_sg64		sge64[5];
-
 } __packed;
 
 struct mfi_init_frame {
