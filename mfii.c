@@ -100,12 +100,6 @@ struct mfii_ccb {
 	struct mfii_request_descr
 				ccb_req;
 
-	ddi_dma_handle_t	ccb_dma_handle;
-
-	/* data for sgl */
-	void			*ccb_data;
-	size_t			ccb_len;
-
 	int			ccb_direction;
 #define MFII_DATA_NONE			0
 #define MFII_DATA_IN			1
@@ -121,20 +115,8 @@ struct mfii_ccb {
 SIMPLEQ_HEAD(mfii_ccb_list, mfii_ccb);
 
 struct mfii_pkt {
-	struct mfii_ccb		*mpd_ccb;
-	struct scsi_pkt		*mpd_pkt;
-
-	ddi_dma_handle_t	mpd_dma_handle;
-	ddi_dma_cookie_t	mpd_cookies;
-	uint_t			mpd_ncookies;
-	uint_t			mpd_curcookie;
-	uint_t			mpd_window;
-	uint_t			mpd_datalen;
-
-	int			mpd_dma_mapped;
-	int			mpd_read;
-	int			mpd_cdblen;
-	int			mpd_senselen;
+	struct mfii_ccb		*mp_ccb;
+	struct scsi_pkt		*mp_pkt;
 };
 
 struct mfii_iop {
@@ -219,11 +201,24 @@ static void		mfii_ld_detach(struct mfii_softc *);
 static int		mfii_pd_attach(struct mfii_softc *);
 static void		mfii_pd_detach(struct mfii_softc *);
 
-#if 0
 static int		mfii_tran_getcap(struct scsi_address *, char *, int);
 static int		mfii_tran_setcap(struct scsi_address *, char *,
 			    int, int);
-#endif
+
+static int		mfii_tran_setup_pkt(struct scsi_pkt *,
+			    int (*)(caddr_t), caddr_t);
+static void		mfii_tran_teardown_pkt(struct scsi_pkt *);
+
+static void		mfii_tran_done(struct mfii_softc *, struct mfii_ccb *);
+
+static int		mfii_ld_tran_tgt_init(dev_info_t *, dev_info_t *,
+			    scsi_hba_tran_t *, struct scsi_device *);
+static int		mfii_ld_tran_start(struct scsi_address *,
+			    struct scsi_pkt *);
+static void		mfii_ld_io(struct mfii_softc *,
+			    struct scsi_address *, struct scsi_pkt *);
+static void		mfii_ld_scsi(struct mfii_softc *,
+			    struct scsi_address *, struct scsi_pkt *);
 
 static ddi_dma_attr_t mfii_req_attr = {
 	DMA_ATTR_V0,		/* version of this structure */
@@ -400,7 +395,6 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 	sc = ddi_get_soft_state(mfii_softc_p, instance);
 	sc->sc_dev = dip;
-	sc->sc_io_dma_attr = mfii_io_attr;
 
 	if (mfii_pci_cfg(sc) != DDI_SUCCESS) {
 		/* error printed by mfii_pci_cfg */
@@ -412,7 +406,6 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		dev_err(dip, CE_WARN, "unable to map register space");
 		goto free_sc;
 	}
-	dev_err(dip, CE_NOTE, "sc_reg %p", sc->sc_reg_baseaddr);
 
 	/* get a different mapping for the iqp */
 	if (ddi_regs_map_setup(dip, 2, (caddr_t *)&sc->sc_iqp,
@@ -421,7 +414,6 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		dev_err(dip, CE_WARN, "unable to map register space");
 		goto free_regs;
 	}
-	dev_err(dip, CE_NOTE, "sc_iqp %p", sc->sc_iqp);
 
 	/* hook up interrupt */
 	if (ddi_intr_hilevel(dip, 0) != 0) {
@@ -451,6 +443,9 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	status = mfii_fw_state(sc);
 	sc->sc_max_cmds = status & MFI_STATE_MAXCMD_MASK;
 	sc->sc_max_sgl = (status & MFI_STATE_MAXSGL_MASK) >> 16;
+
+	sc->sc_io_dma_attr = mfii_io_attr;
+	sc->sc_io_dma_attr.dma_attr_sgllen = sc->sc_max_sgl;
 
 	/* sense memory */
 	sc->sc_sense = mfii_dmamem_alloc(sc, &mfii_cmd_attr,
@@ -640,15 +635,6 @@ mfii_intr(caddr_t arg)
 			break;
 		}
 
-		dev_err(sc->sc_dev, CE_NOTE, "%s: %u 0x%016lx", __func__,
-		    sc->sc_reply_postq_index, *(uint64_t *)rdp);
-		dev_err(sc->sc_dev, CE_NOTE,
-		    "  flags 0x%x vf_id 0x%x smid %u data 0x%08x",
-		    rdp->reply_flags, rdp->vf_id, LE_16(rdp->smid),
-		    LE_32(rdp->data));
-		if (rdp != NULL)
-			break;
-
 		ccb = &sc->sc_ccbs[LE_16(rdp->smid) - 1];
 		mfii_done(sc, ccb);
 		memset(rdp, 0xff, sizeof(*rdp));
@@ -670,9 +656,6 @@ mfii_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_requests),
 	    ccb->ccb_request_offset, MFII_REQUEST_SIZE,
 	    DDI_DMA_SYNC_FORKERNEL);
-
-	if (ccb->ccb_len > 0 && ccb->ccb_direction == MFII_DATA_IN)
-		ddi_dma_sync(ccb->ccb_dma_handle, 0, 0, DDI_DMA_SYNC_FORCPU);
 
 	ccb->ccb_done(sc, ccb);
 }
@@ -935,23 +918,25 @@ mfii_mfa_poll(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	return (rv);
 }
 
+#define MFII_TRAN_FLAGS \
+    (SCSI_HBA_TRAN_CLONE | SCSI_HBA_TRAN_CDB | SCSI_HBA_TRAN_SCB)
+
 static int
 mfii_ld_attach(struct mfii_softc *sc)
 {
-	scsi_hba_tran_t			*tran;
+	scsi_hba_tran_t	*tran;
 
 	tran = scsi_hba_tran_alloc(sc->sc_dev, SCSI_HBA_CANSLEEP);
 	if (tran == NULL)
 		return (DDI_FAILURE);
 
-	tran->tran_hba_dip = sc->sc_dev;
 	tran->tran_hba_private = sc;
 
 	tran->tran_tgt_init = mfii_ld_tran_tgt_init;
 	tran->tran_tgt_probe = scsi_hba_probe;
 
 	tran->tran_start = mfii_ld_tran_start;
-	tran->tran_reset = mfii_tran_reset;
+	//tran->tran_reset = mfii_tran_reset;
 
 	tran->tran_getcap = mfii_tran_getcap;
 	tran->tran_setcap = mfii_tran_setcap;
@@ -961,7 +946,7 @@ mfii_ld_attach(struct mfii_softc *sc)
 	tran->tran_hba_len = sizeof(struct mfii_pkt);
 
 	if (scsi_hba_attach_setup(sc->sc_dev, &sc->sc_io_dma_attr, tran,
-	    SCSI_HBA_TRAN_CLONE) != DDI_SUCCESS)
+	    MFII_TRAN_FLAGS) != DDI_SUCCESS)
 		goto tran_free;
 
 	sc->sc_ld_tran = tran;
@@ -970,14 +955,13 @@ mfii_ld_attach(struct mfii_softc *sc)
 
 tran_free:
 	scsi_hba_tran_free(tran);
-err:
 	return (DDI_FAILURE);
 }
 
 static void
 mfii_ld_detach(struct mfii_softc *sc)
 {
-	scsi_hba_detach(sc->sc_ld_dev);
+	scsi_hba_detach(sc->sc_dev);
 	scsi_hba_tran_free(sc->sc_ld_tran);
 }
 
@@ -1017,9 +1001,9 @@ mfii_pd_attach(struct mfii_softc *sc)
 		goto tran_free;
 
 	sc->sc_pd_tran = tran;
-
+#endif
 	return (DDI_SUCCESS);
-
+#if 0
 tran_free:
 	scsi_hba_tran_free(tran);
 err:
@@ -1031,9 +1015,350 @@ static void
 mfii_pd_detach(struct mfii_softc *sc)
 {
 #if 0
-	scsi_hba_detach(sc->sc_pd_dev);
+	scsi_hba_detach(sc->sc_dev);
 	scsi_hba_tran_free(sc->sc_pd_tran);
 #endif
+}
+
+static int
+mfii_ld_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
+    scsi_hba_tran_t *tran, struct scsi_device *sd)
+{
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+
+	if (sd->sd_address.a_target > sc->sc_info.mci_max_lds)
+		return (DDI_FAILURE);
+
+	/* ld read/write dont take a lun, so only 0 is supported */
+	if (sd->sd_address.a_lun != 0)
+		return (DDI_FAILURE);
+
+	return (DDI_SUCCESS);
+}
+
+static int
+mfii_tran_getcap(struct scsi_address *ap, char *cap, int whom)
+{
+	//struct mfii_softc *sc;
+	int index;
+
+	//sc = (struct mfii_softc *)ap->a_hba_tran->tran_hba_private;
+
+	index = scsi_hba_lookup_capstr(cap);
+	if (index == DDI_FAILURE)
+		return (-1);
+
+	//DTRACE_PROBE1(getcap_index, int, index);
+
+	if (cap == NULL || whom == 0)
+		return (-1);
+
+	switch (index) {
+	case SCSI_CAP_ARQ:
+	case SCSI_CAP_TAGGED_QING:
+	case SCSI_CAP_UNTAGGED_QING:
+		return (1);
+	default:
+		break;
+	}
+
+	return (-1);
+}
+
+static int
+mfii_tran_setcap(struct scsi_address *ap, char *cap, int value, int whom)
+{
+	//struct mfii_softc *sc;
+	int index;
+
+	//sc = (struct mfii_softc *)ap->a_hba_tran->tran_hba_private;
+
+	index = scsi_hba_lookup_capstr(cap);
+	if (index == DDI_FAILURE)
+		return (-1);
+
+	//DTRACE_PROBE1(setcap_index, int, index);
+
+	if (cap == NULL || whom == 0)
+		return (-1);
+
+	switch (index) {
+	case SCSI_CAP_ARQ:
+	case SCSI_CAP_TAGGED_QING:
+	case SCSI_CAP_UNTAGGED_QING:
+		return (1);
+	default:
+		break;
+	}
+
+	return (0);
+}
+
+static int
+mfii_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
+    caddr_t arg)
+{
+	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
+	struct mfii_ccb *ccb;
+	//int kmflags = callback == SLEEP_FUNC ? KM_SLEEP : KM_NOSLEEP;
+
+	if (pkt->pkt_cdblen > MPII_CDB_LEN)
+		return (-1);
+	if (pkt->pkt_scblen > sizeof(*ccb->ccb_sense))
+		return (-1);
+
+	ccb = mfii_ccb_get(sc);
+	if (ccb == NULL)
+		return (-1);
+
+	ccb->ccb_cookie = mp;
+	mp->mp_ccb = ccb;
+	mp->mp_pkt = pkt;
+
+	return (0);
+}
+
+static void
+mfii_tran_teardown_pkt(struct scsi_pkt *pkt)
+{
+	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
+	struct mfii_ccb *ccb = mp->mp_ccb;
+
+	mp->mp_ccb = NULL;
+	mp->mp_pkt = NULL;
+
+	mfii_ccb_put(sc, ccb);
+}
+
+static size_t
+mfii_sgl(struct mfii_softc *sc, struct mfii_ccb *ccb, void *sglp,
+    ddi_dma_cookie_t *cookies, uint_t ncookies)
+{
+	struct mpii_msg_request *req = ccb->ccb_request;
+	struct mfii_sge *sge = NULL, *nsge = sglp;
+	struct mfii_sge *ce = NULL;
+	size_t datalen = 0;
+	u_int space;
+	uint_t i;
+
+        if (ncookies == 0)
+                return (0);
+
+	space = (MFII_REQUEST_SIZE - ((uint8_t *)nsge - (uint8_t *)req)) /
+            sizeof(*nsge);
+        if (ncookies > space) {
+		space--;
+
+		ccb->ccb_sgl_len = (ncookies - space) * sizeof(*nsge);
+		memset(ccb->ccb_sgl, 0, ccb->ccb_sgl_len);
+
+		ce = nsge + space;
+		ce->sg_addr = LE_64(ccb->ccb_sgl_dva);
+		ce->sg_len = LE_32(ccb->ccb_sgl_len);
+		ce->sg_flags = sc->sc_iop->sge_flag_chain;
+
+		req->chain_offset = ((uint8_t *)ce - (uint8_t *)req) / 16;
+	}
+
+	for (i = 0; i < ncookies; i++) {
+		if (nsge == ce)
+			nsge = ccb->ccb_sgl;
+
+		sge = nsge;
+
+		sge->sg_addr = LE_64(cookies[i].dmac_laddress);
+                sge->sg_len = LE_32(cookies[i].dmac_size);
+		sge->sg_flags = MFII_SGE_ADDR_SYSTEM;
+
+		nsge = sge + 1;
+
+		datalen += cookies[i].dmac_size;
+        }
+	sge->sg_flags |= sc->sc_iop->sge_flag_eol;
+
+	if (ccb->ccb_sgl_len > 0) {
+		ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_sgl),
+		    ccb->ccb_sgl_offset, ccb->ccb_sgl_len,
+		    DDI_DMA_SYNC_FORDEV);
+	}
+
+	return (datalen);
+}
+
+static int
+mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
+{
+	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
+	struct mfii_ccb *ccb = mp->mp_ccb;
+	union scsi_cdb *cdb;
+
+	if (pkt->pkt_numcookies > sc->sc_max_sgl)
+		return (TRAN_BADPKT);
+
+	memset(ccb->ccb_request, 0, MFII_REQUEST_SIZE);
+	ccb->ccb_done = mfii_tran_done;
+
+	cdb = (union scsi_cdb *)pkt->pkt_cdbp;
+	switch (cdb->scc_cmd) {
+        case SCMD_READ:
+	case SCMD_READ_G1:
+	case SCMD_READ_G4:
+	case SCMD_WRITE:
+	case SCMD_WRITE_G1:
+	case SCMD_WRITE_G4:
+		/* G5 READS AND WRITES? */
+		mfii_ld_io(sc, ap, pkt);
+		break;
+
+	default:
+		mfii_ld_scsi(sc, ap, pkt);
+		break;
+	}
+
+	pkt->pkt_resid = 0;
+	pkt->pkt_reason = CMD_CMPLT;
+	pkt->pkt_statistics = 0;
+	pkt->pkt_state = STATE_GOT_BUS | STATE_GOT_TARGET | STATE_SENT_CMD;
+
+	if (pkt->pkt_flags & FLAG_NOINTR) {
+		if (mfii_mfa_poll(sc, ccb) != DDI_SUCCESS)
+			return (TRAN_FATAL_ERROR);
+	} else
+		mfii_start(sc, ccb);
+
+	return (TRAN_ACCEPT);
+}
+
+static void
+mfii_ld_io(struct mfii_softc *sc, struct scsi_address *ap,
+    struct scsi_pkt *pkt)
+{
+	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
+	struct mfii_ccb *ccb = mp->mp_ccb;
+	struct mpii_msg_scsi_io *io = ccb->ccb_request;
+	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
+	size_t datalen;
+
+	datalen = mfii_sgl(sc, ccb, ctx + 1,
+	    pkt->pkt_cookies, pkt->pkt_numcookies);
+
+	io->dev_handle = LE_16(ap->a_target);
+	io->function = MFII_FUNCTION_LDIO_REQUEST;
+	io->sense_buffer_low_address = LE_32(ccb->ccb_sense_dva);
+	io->sgl_flags = LE_16(MFI_FRAME_SGL64);
+	io->sense_buffer_length = sizeof(*ccb->ccb_sense);
+	io->sgl_offset0 = (sizeof(*io) + sizeof(*ctx)) / 4;
+	io->data_length = LE_32(datalen);
+	io->io_flags = LE_16(pkt->pkt_cdblen);
+	memcpy(io->cdb, pkt->pkt_cdbp, pkt->pkt_cdblen);
+
+	io->direction = MPII_SCSIIO_DIR_NONE;
+	if (datalen > 0) {
+		if (pkt->pkt_dma_flags & DDI_DMA_READ)
+			io->direction = MPII_SCSIIO_DIR_READ;
+		else if (pkt->pkt_dma_flags & DDI_DMA_WRITE)
+			io->direction = MPII_SCSIIO_DIR_WRITE;
+	}
+
+	ctx->type_nseg = sc->sc_iop->ldio_ctx_type_nseg;
+	ctx->timeout_value = LE_16(pkt->pkt_time);
+	ctx->reg_lock_flags = sc->sc_iop->ldio_ctx_reg_lock_flags;
+	ctx->virtual_disk_target_id = LE_16(ap->a_target);
+	ctx->num_sge = pkt->pkt_numcookies;
+
+	memset(&ccb->ccb_req, 0, sizeof(ccb->ccb_req));
+	ccb->ccb_req.flags = sc->sc_iop->ldio_req_type;
+	ccb->ccb_req.smid = LE_16(ccb->ccb_smid);
+}
+
+static void
+mfii_ld_scsi(struct mfii_softc *sc, struct scsi_address *ap,
+    struct scsi_pkt *pkt)
+{
+	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
+	struct mfii_ccb *ccb = mp->mp_ccb;
+	struct mpii_msg_scsi_io *io = ccb->ccb_request;
+	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
+	size_t datalen;
+
+	datalen = mfii_sgl(sc, ccb, ctx + 1,
+	    pkt->pkt_cookies, pkt->pkt_numcookies);
+
+	io->dev_handle = LE_16(ap->a_target);
+	io->function = MFII_FUNCTION_LDIO_REQUEST;
+	io->sense_buffer_low_address = LE_32(ccb->ccb_sense_dva);
+	io->sgl_flags = LE_16(MFI_FRAME_SGL64);
+	io->sense_buffer_length = sizeof(*ccb->ccb_sense);
+	io->sgl_offset0 = (sizeof(*io) + sizeof(*ctx)) / 4;
+	io->data_length = LE_32(datalen);
+	io->io_flags = LE_16(pkt->pkt_cdblen);
+	memcpy(io->cdb, pkt->pkt_cdbp, pkt->pkt_cdblen);
+
+	io->direction = MPII_SCSIIO_DIR_NONE;
+	if (datalen > 0) {
+		if (pkt->pkt_dma_flags & DDI_DMA_READ)
+			io->direction = MPII_SCSIIO_DIR_READ;
+		else if (pkt->pkt_dma_flags & DDI_DMA_WRITE)
+			io->direction = MPII_SCSIIO_DIR_WRITE;
+	}
+
+	ctx->virtual_disk_target_id = LE_16(ap->a_target);
+	ctx->num_sge = pkt->pkt_numcookies;
+
+	memset(&ccb->ccb_req, 0, sizeof(ccb->ccb_req));
+	ccb->ccb_req.flags = MFII_REQ_TYPE_SCSI;
+	ccb->ccb_req.smid = LE_16(ccb->ccb_smid);
+}
+
+static void
+mfii_tran_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
+{
+	struct mfii_pkt *mp = ccb->ccb_cookie;
+	struct scsi_pkt *pkt = mp->mp_pkt;
+	struct mpii_msg_scsi_io *io = ccb->ccb_request;
+	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
+	struct scsi_arq_status *arqstat;
+
+	switch (ctx->status) {
+	case MFI_STAT_SCSI_DONE_WITH_ERROR:
+		pkt->pkt_state |= STATE_GOT_STATUS | STATE_ARQ_DONE;
+
+		arqstat = (struct scsi_arq_status *)pkt->pkt_scbp;
+		arqstat->sts_rqpkt_reason = CMD_CMPLT;
+		arqstat->sts_rqpkt_resid = 0;
+		arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
+		    STATE_SENT_CMD | STATE_XFERRED_DATA;
+		arqstat->sts_rqpkt_statistics = 0;
+
+		memcpy(&arqstat->sts_sensedata, ccb->ccb_sense,
+		    sizeof(arqstat->sts_sensedata));
+
+		/* FALLTHROUGH */
+	case MFI_STAT_OK:
+	case MFI_STAT_LD_CC_IN_PROGRESS:
+	case MFI_STAT_LD_RECON_IN_PROGRESS:
+		pkt->pkt_reason = CMD_CMPLT;
+		pkt->pkt_state |= STATE_XFERRED_DATA;
+		pkt->pkt_resid = 0;
+		break;
+
+	case MFI_STAT_LD_OFFLINE:
+	case MFI_STAT_DEVICE_NOT_FOUND:
+		pkt->pkt_reason = CMD_DEV_GONE;
+		break;
+
+	default:
+		pkt->pkt_reason = CMD_TRAN_ERR;
+                break;
+        }
+
+	pkt->pkt_comp(pkt);
 }
 
 static void
@@ -1044,9 +1369,6 @@ mfii_start(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_requests),
 	    ccb->ccb_request_offset, MFII_REQUEST_SIZE,
 	    DDI_DMA_SYNC_FORDEV);
-
-	dev_err(sc->sc_dev, CE_NOTE, "%s: ccb %u @%p", __func__, ccb->ccb_smid,
-	    ccb);
 
 #if defined(__LP64__)
 	ddi_put64(sc->sc_iqp_space, (uint64_t *)sc->sc_iqp, *r);
@@ -1071,15 +1393,6 @@ mfii_ccbs_ctor(struct mfii_softc *sc)
 
 	for (i = 0; i < sc->sc_max_cmds; i++) {
 		ccb = &sc->sc_ccbs[i];
-
-		/* create a dma map for transfer */
-		if (ddi_dma_alloc_handle(sc->sc_dev, &sc->sc_io_dma_attr,
-		    DDI_DMA_SLEEP, NULL,
-		    &ccb->ccb_dma_handle) != DDI_SUCCESS) {
-			dev_err(sc->sc_dev, CE_WARN,
-			    "unable to allocate dma handle for command %d", i);
-			goto destroy;
-		}
 
 		/* select i + 1'th request. 0 is reserved for events */
 		ccb->ccb_smid = i + 1;
@@ -1106,19 +1419,12 @@ mfii_ccbs_ctor(struct mfii_softc *sc)
 	}
 
 	return (DDI_SUCCESS);
-
-destroy:
-	mfii_ccbs_dtor(sc);
-	return (DDI_FAILURE);
 }
 
 static void
 mfii_ccbs_dtor(struct mfii_softc *sc)
 {
 	struct mfii_ccb *ccb;
-
-	while ((ccb = mfii_ccb_get(sc)) != NULL)
-		ddi_dma_free_handle(&ccb->ccb_dma_handle);
 
 	kmem_free(sc->sc_ccbs, sc->sc_max_cmds * sizeof(*ccb));
 }
