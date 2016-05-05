@@ -1012,6 +1012,7 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 	} else if (strcmp(addr, "p0") == 0) {
 		tran->tran_tgt_init = mfii_pd_tran_tgt_init;
 		tran->tran_start = mfii_pd_tran_start;
+		tran->tran_interconnect_type = INTERCONNECT_SAS;
 	} else
 		return (DDI_FAILURE);
 
