@@ -1203,9 +1203,6 @@ mfii_sgl(struct mfii_softc *sc, struct mfii_ccb *ccb, void *sglp,
 static int
 mfii_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 {
-	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
-	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
-
 	return (TRAN_BADPKT);
 }
 
@@ -1258,9 +1255,6 @@ mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 static int
 mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 {
-	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
-	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
-
 	return (TRAN_BADPKT);
 }
 
