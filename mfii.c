@@ -701,7 +701,7 @@ mfii_pci_cfg(struct mfii_softc *sc)
 
 	id = pci_config_get32(pci_conf, PCI_CONF_VENID);
 	switch (id) {
-	case MFII_PCI_ID_2008:
+	case MFII_PCI_ID_2208:
 		sc->sc_iop = &mfii_iop_thunderbolt;
 		break;
 	case MFII_PCI_ID_3008:

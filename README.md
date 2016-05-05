@@ -1,7 +1,7 @@
 The `mfii` driver provides support for the MegaRAID SAS Fusion family of
 RAID controllers. This family of controllers includes the following chips:
 
-- SAS2008
+- SAS2208
 - SAS3008
 - SAS3108
 
