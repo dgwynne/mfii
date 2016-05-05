@@ -157,8 +157,7 @@ struct mfii_softc {
 	struct mfii_ccb_list	sc_ccb_list;
 	kmutex_t		sc_ccb_mtx;
 
-	scsi_hba_tran_t		*sc_ld_tran;
-	scsi_hba_tran_t		*sc_pd_tran;
+	scsi_hba_tran_t		*sc_tran;
 
 	struct mfi_ctrl_info	sc_info;
 };
@@ -196,10 +195,15 @@ static int		mfii_dcmd(struct mfii_softc *, struct mfii_ccb *,
 static int		mfii_mfa_poll(struct mfii_softc *, struct mfii_ccb *);
 static void		mfii_done(struct mfii_softc *, struct mfii_ccb *);
 
-static int		mfii_ld_attach(struct mfii_softc *);
-static void		mfii_ld_detach(struct mfii_softc *);
-static int		mfii_pd_attach(struct mfii_softc *);
-static void		mfii_pd_detach(struct mfii_softc *);
+static int		mfii_hba_attach(struct mfii_softc *);
+static void		mfii_hba_detach(struct mfii_softc *);
+
+static int		mfii_iport_attach(dev_info_t *, ddi_attach_cmd_t);
+
+static int		mfii_tran_tgt_init(dev_info_t *, dev_info_t *,
+			    scsi_hba_tran_t *, struct scsi_device *);
+static int		mfii_tran_start(struct scsi_address *,
+			    struct scsi_pkt *);
 
 static int		mfii_tran_getcap(struct scsi_address *, char *, int);
 static int		mfii_tran_setcap(struct scsi_address *, char *,
@@ -209,8 +213,6 @@ static int		mfii_tran_setup_pkt(struct scsi_pkt *,
 			    int (*)(caddr_t), caddr_t);
 static void		mfii_tran_teardown_pkt(struct scsi_pkt *);
 
-static void		mfii_tran_done(struct mfii_softc *, struct mfii_ccb *);
-
 static int		mfii_ld_tran_tgt_init(dev_info_t *, dev_info_t *,
 			    scsi_hba_tran_t *, struct scsi_device *);
 static int		mfii_ld_tran_start(struct scsi_address *,
@@ -219,6 +221,13 @@ static void		mfii_ld_io(struct mfii_softc *,
 			    struct scsi_address *, struct scsi_pkt *);
 static void		mfii_ld_scsi(struct mfii_softc *,
 			    struct scsi_address *, struct scsi_pkt *);
+
+static int		mfii_pd_tran_tgt_init(dev_info_t *, dev_info_t *,
+			    scsi_hba_tran_t *, struct scsi_device *);
+static int		mfii_pd_tran_start(struct scsi_address *,
+			    struct scsi_pkt *);
+
+static void		mfii_tran_done(struct mfii_softc *, struct mfii_ccb *);
 
 static ddi_dma_attr_t mfii_req_attr = {
 	DMA_ATTR_V0,		/* version of this structure */
@@ -378,6 +387,9 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	int instance;
 	uint32_t status;
 
+	if (scsi_hba_iport_unit_address(dip) != NULL)
+		return (mfii_iport_attach(dip, cmd));
+
 	switch (cmd) {
 	case DDI_ATTACH:
 		break;
@@ -520,19 +532,15 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		    LE_16(sc->sc_info.mci_memory_size));
 	}
 
-	if (mfii_ld_attach(sc) != DDI_SUCCESS) {
-		cmn_err(CE_WARN, "unable to attach logical device bus");
+	if (scsi_hba_iport_register(dip, "v0") != DDI_SUCCESS)
 		goto del_intr;
-	}
+	if (scsi_hba_iport_register(dip, "p0") != DDI_SUCCESS)
+		goto del_intr;
 
-	if (mfii_pd_attach(sc) != DDI_SUCCESS) {
-		cmn_err(CE_WARN, "unable to attach physical device bus");
-		goto ld_detach;
-	}
+	if (mfii_hba_attach(sc) != DDI_SUCCESS)
+		goto del_intr;
 
 	return (DDI_SUCCESS);
-ld_detach:
-	mfii_ld_detach(sc);
 del_intr:
 	ddi_remove_intr(sc->sc_dev, 0, sc->sc_iblock_cookie);
 ccb_dtor:
@@ -564,6 +572,9 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	struct mfii_softc	*sc;
 	int			instance;
 
+	if (scsi_hba_iport_unit_address(dip) != NULL)
+		return (DDI_SUCCESS);
+
 	switch (cmd) {
 	case DDI_DETACH:
 		break;
@@ -576,8 +587,7 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	instance = ddi_get_instance(dip);
 	sc = ddi_get_soft_state(mfii_softc_p, instance);
 
-	mfii_pd_detach(sc);
-	mfii_ld_detach(sc);
+	mfii_hba_detach(sc);
 	ddi_remove_intr(sc->sc_dev, 0, sc->sc_iblock_cookie);
 	mfii_ccbs_dtor(sc);
 	mfii_dmamem_free(sc, sc->sc_sgl);
@@ -918,13 +928,12 @@ mfii_mfa_poll(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	return (rv);
 }
 
-#define MFII_TRAN_FLAGS \
-    (SCSI_HBA_TRAN_CLONE | SCSI_HBA_TRAN_CDB | SCSI_HBA_TRAN_SCB)
 
 static int
-mfii_ld_attach(struct mfii_softc *sc)
+mfii_hba_attach(struct mfii_softc *sc)
 {
 	scsi_hba_tran_t	*tran;
+	int flags;
 
 	tran = scsi_hba_tran_alloc(sc->sc_dev, SCSI_HBA_CANSLEEP);
 	if (tran == NULL)
@@ -932,10 +941,10 @@ mfii_ld_attach(struct mfii_softc *sc)
 
 	tran->tran_hba_private = sc;
 
-	tran->tran_tgt_init = mfii_ld_tran_tgt_init;
+	tran->tran_tgt_init = mfii_tran_tgt_init;
 	tran->tran_tgt_probe = scsi_hba_probe;
 
-	tran->tran_start = mfii_ld_tran_start;
+	tran->tran_start = mfii_tran_start;
 	//tran->tran_reset = mfii_tran_reset;
 
 	tran->tran_getcap = mfii_tran_getcap;
@@ -945,11 +954,14 @@ mfii_ld_attach(struct mfii_softc *sc)
 	tran->tran_teardown_pkt = mfii_tran_teardown_pkt;
 	tran->tran_hba_len = sizeof(struct mfii_pkt);
 
+	flags = SCSI_HBA_HBA | SCSI_HBA_TRAN_CLONE |
+	    SCSI_HBA_TRAN_CDB | SCSI_HBA_TRAN_SCB;
+
 	if (scsi_hba_attach_setup(sc->sc_dev, &sc->sc_io_dma_attr, tran,
-	    MFII_TRAN_FLAGS) != DDI_SUCCESS)
+	    flags) != DDI_SUCCESS)
 		goto tran_free;
 
-	sc->sc_ld_tran = tran;
+	sc->sc_tran = tran;
 
 	return (DDI_SUCCESS);
 
@@ -959,72 +971,70 @@ tran_free:
 }
 
 static void
-mfii_ld_detach(struct mfii_softc *sc)
+mfii_hba_detach(struct mfii_softc *sc)
 {
 	scsi_hba_detach(sc->sc_dev);
-	scsi_hba_tran_free(sc->sc_ld_tran);
+	scsi_hba_tran_free(sc->sc_tran);
 }
 
 static int
-mfii_pd_attach(struct mfii_softc *sc)
+mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 {
-#if 0
+	struct mfii_softc *sc;
 	scsi_hba_tran_t *tran;
+	dev_info_t *dip;
+	int instance;
+	const char *addr;
 
-	tran = scsi_hba_tran_alloc(sc->sc_dev, SCSI_HBA_CANSLEEP);
-	if (tran == NULL)
+	switch (cmd) {
+	case DDI_ATTACH:
+		break;
+
+	case DDI_RESUME:
+		return (DDI_SUCCESS);
+	default:
+		return (DDI_FAILURE);
+	}
+
+	addr = scsi_hba_iport_unit_address(iport_dip);
+	VERIFY(addr != NULL);
+
+	dip = ddi_get_parent(iport_dip);
+	instance = ddi_get_instance(dip);
+	sc = ddi_get_soft_state(mfii_softc_p, instance);
+	VERIFY(sc != NULL);
+
+	tran = ddi_get_driver_private(iport_dip);
+
+	if (strcmp(addr, "v0") == 0) {
+		tran->tran_tgt_init = mfii_ld_tran_tgt_init;
+		tran->tran_start = mfii_ld_tran_start;
+	} else if (strcmp(addr, "p0") == 0) {
+		tran->tran_tgt_init = mfii_pd_tran_tgt_init;
+		tran->tran_start = mfii_pd_tran_start;
+	} else
 		return (DDI_FAILURE);
 
 	tran->tran_hba_private = sc;
-	tran->tran_tgt_private = NULL;
-	tran->tran_tgt_init = mfii_pd_tran_tgt_init;
-	tran->tran_tgt_probe = scsi_hba_probe;
-	/* tran->tran_tgt_free */
 
-	tran->tran_start = mfi_tran_start;
-	tran->tran_reset = mfi_tran_reset;
-	tran->tran_getcap = mfi_tran_getcap;
-	tran->tran_setcap = mfi_tran_setcap;
-	tran->tran_init_pkt = mfi_tran_init_pkt;
-	tran->tran_destroy_pkt = mfi_tran_destroy_pkt;
-	tran->tran_dmafree = mfi_tran_dmafree;
-	tran->tran_sync_pkt = mfi_tran_sync_pkt;
-
-	tran->tran_abort = NULL;
-	tran->tran_tgt_free = NULL;
-	tran->tran_quiesce = NULL;
-	tran->tran_unquiesce = NULL;
-	tran->tran_sd = NULL;
-
-	if (scsi_hba_attach_setup(sc->sc_dev, &mfii_io_attr, tran,
-	    SCSI_HBA_TRAN_CLONE) != DDI_SUCCESS)
-		goto tran_free;
-
-	sc->sc_pd_tran = tran;
-#endif
 	return (DDI_SUCCESS);
-#if 0
-tran_free:
-	scsi_hba_tran_free(tran);
-err:
-#endif
-	return (DDI_FAILURE);
-}
-
-static void
-mfii_pd_detach(struct mfii_softc *sc)
-{
-#if 0
-	scsi_hba_detach(sc->sc_dev);
-	scsi_hba_tran_free(sc->sc_pd_tran);
-#endif
 }
 
 static int
-mfii_ld_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
+mfii_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
+    scsi_hba_tran_t *tran, struct scsi_device *sd)
+{
+	/* we only attach on iports */
+	return (DDI_FAILURE);
+}
+
+int
+mfii_ld_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
     scsi_hba_tran_t *tran, struct scsi_device *sd)
 {
 	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+
+	VERIFY(scsi_hba_iport_unit_address(dip) != NULL);
 
 	if (sd->sd_address.a_target > sc->sc_info.mci_max_lds)
 		return (DDI_FAILURE);
@@ -1037,12 +1047,16 @@ mfii_ld_tran_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 }
 
 static int
+mfii_pd_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
+    scsi_hba_tran_t *tran, struct scsi_device *sd)
+{
+	return (DDI_SUCCESS);
+}
+
+static int
 mfii_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 {
-	//struct mfii_softc *sc;
 	int index;
-
-	//sc = (struct mfii_softc *)ap->a_hba_tran->tran_hba_private;
 
 	index = scsi_hba_lookup_capstr(cap);
 	if (index == DDI_FAILURE)
@@ -1068,10 +1082,7 @@ mfii_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 static int
 mfii_tran_setcap(struct scsi_address *ap, char *cap, int value, int whom)
 {
-	//struct mfii_softc *sc;
 	int index;
-
-	//sc = (struct mfii_softc *)ap->a_hba_tran->tran_hba_private;
 
 	index = scsi_hba_lookup_capstr(cap);
 	if (index == DDI_FAILURE)
@@ -1190,6 +1201,15 @@ mfii_sgl(struct mfii_softc *sc, struct mfii_ccb *ccb, void *sglp,
 }
 
 static int
+mfii_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
+{
+	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+
+	return (TRAN_BADPKT);
+}
+
+static int
 mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 {
 	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
@@ -1233,6 +1253,15 @@ mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 		mfii_start(sc, ccb);
 
 	return (TRAN_ACCEPT);
+}
+
+static int
+mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
+{
+	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+
+	return (TRAN_BADPKT);
 }
 
 static void
