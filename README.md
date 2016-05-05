@@ -11,7 +11,7 @@ generations of MegaRAID SAS controllers is significantly different to
 the one used in the Fusion family, which complicates support for both
 styles of controller in a single driver.
 
-= Todo
+# Todo
 
 - Support for accessing passthrough/physical disks
 - `tran_abort()` implementation for aborting in flight SCSI commands
