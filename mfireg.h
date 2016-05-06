@@ -372,11 +372,17 @@ struct mfi_pass_frame {
 	union mfi_sgl		mpf_sgl;
 } __packed;
 
+union mfi_mbox {
+	uint8_t			b[MFI_MBOX_SIZE];
+	uint16_t		s[6];
+	uint32_t		w[3];
+} __packed;
+
 #define MFI_DCMD_FRAME_SIZE	40
 struct mfi_dcmd_frame {
 	struct mfi_frame_header mdf_header;
 	uint32_t		mdf_opcode;
-	uint8_t			mdf_mbox[MFI_MBOX_SIZE];
+	union mfi_mbox		mdf_mbox;
 	union mfi_sgl		mdf_sgl;
 } __packed;
 
@@ -817,8 +823,8 @@ struct mfi_ld_parm {
 } __packed;
 
 struct mfi_ld_span {
-	uint16_t		mls_start_block;
-	uint16_t		mls_no_blocks;
+	uint64_t		mls_start_block;
+	uint64_t		mls_no_blocks;
 	uint16_t		mls_index;
 	uint8_t			mls_res[6];
 } __packed;
@@ -844,7 +850,7 @@ struct mfi_ld_progress {
 
 struct mfi_ld_details {
 	struct mfi_ld_cfg	mld_cfg;
-	uint16_t		mld_size;
+	uint64_t		mld_size;
 	struct mfi_ld_progress	mld_progress;
 	uint16_t		mld_clust_own_id;
 	uint8_t			mld_res1;
@@ -861,7 +867,7 @@ struct mfi_pd_address {
 	uint8_t			mpa_enc_slot;
 	uint8_t			mpa_scsi_type;
 	uint8_t			mpa_port;
-	uint16_t		mpa_sas_address[2];
+	uint64_t		mpa_sas_address[2];
 } __packed;
 
 struct mfi_pd_list {
@@ -918,12 +924,12 @@ struct mfi_pd_details {
 		uint8_t		mpp_severed;
 		uint8_t		mpp_connector_idx[2];
 		uint8_t		mpp_res[4];
-		uint16_t	mpp_sas_addr[2];
+		uint64_t	mpp_sas_addr[2];
 		uint8_t		mpp_res2[16];
 	} __packed mpd_path;
-	uint16_t		mpd_size;
-	uint16_t		mpd_no_coerce_size;
-	uint16_t		mpd_coerce_size;
+	uint64_t		mpd_size;
+	uint64_t		mpd_no_coerce_size;
+	uint64_t		mpd_coerce_size;
 	uint16_t		mpd_enc_id;
 	uint8_t			mpd_enc_idx;
 	uint8_t			mpd_enc_slot;
@@ -972,7 +978,7 @@ struct mfi_pd_allowedops_list {
 
 /* array configuration from MR_DCMD_CONF_GET */
 struct mfi_array {
-	uint16_t		mar_smallest_pd;
+	uint64_t		mar_smallest_pd;
 	uint8_t			mar_no_disk;
 	uint8_t			mar_res1;
 	uint16_t		mar_array_ref;
