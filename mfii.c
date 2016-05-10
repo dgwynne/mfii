@@ -31,6 +31,7 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/queue.h>
+#include <sys/atomic.h>
 
 #include "mfiireg.h"
 
@@ -65,6 +66,10 @@ static struct modlinkage mfii_modlinkage = {
 	MODREV_1,
 	&mfii_modldrv,
 	NULL
+};
+
+struct refcnt {
+	unsigned int		refs;
 };
 
 struct mfii_dmamem {
@@ -127,6 +132,22 @@ struct mfii_iop {
 	uint8_t			sge_flag_eol;
 };
 
+struct mfii_pd_tgt {
+	struct refcnt		ptgt_refcnt;
+	TAILQ_ENTRY(mfii_pd_tgt)
+				ptgt_entry;
+
+	uint64_t		ptgt_wwn;
+
+	uint16_t		ptgt_id;
+	uint16_t		ptgt_handle;
+};
+
+struct mfii_pd_lu {
+	struct mfii_pd_tgt	*plu_tgt;
+	uint64_t		plu_lun;
+};
+
 struct mfii_softc {
 	dev_info_t		*sc_dev;
 	ddi_iblock_cookie_t	sc_iblock_cookie;
@@ -161,6 +182,11 @@ struct mfii_softc {
 
 	scsi_hba_tgtmap_t	*sc_ld_map;
 	scsi_hba_tgtmap_t	*sc_pd_map;
+
+	ddi_soft_state_bystr	*sc_ptgt_lus;
+	kmutex_t		sc_ptgt_mtx;
+	TAILQ_HEAD(, mfii_pd_tgt)
+				sc_ptgt_list;
 
 	struct mfi_ctrl_info	sc_info;
 };
@@ -238,10 +264,37 @@ static void		mfii_ld_scsi(struct mfii_softc *,
 
 static int		mfii_pd_tran_tgt_init(dev_info_t *, dev_info_t *,
 			    scsi_hba_tran_t *, struct scsi_device *);
+static void		mfii_pd_tran_tgt_free(dev_info_t *, dev_info_t *,
+			    scsi_hba_tran_t *, struct scsi_device *);
 static int		mfii_pd_tran_start(struct scsi_address *,
 			    struct scsi_pkt *);
+static int		mfii_pd_tran_getcap(struct scsi_address *, char *, int);
 
 static void		mfii_tran_done(struct mfii_softc *, struct mfii_ccb *);
+
+static int		mfii_pd_tgt_insert(struct mfii_softc *, uint64_t,
+			    uint16_t, uint16_t);
+static void		mfii_pd_tgt_rele(struct mfii_pd_tgt *);
+static struct mfii_pd_tgt *
+			mfii_pd_tgt_lookup(struct mfii_softc *sc, const char *);
+
+static inline void
+refcnt_init(struct refcnt *r)
+{
+	r->refs = 1;
+}
+
+static inline void
+refcnt_take(struct refcnt *r)
+{
+	atomic_inc_uint(&r->refs);
+}
+
+static inline int
+refcnt_rele(struct refcnt *r)
+{
+	return (atomic_dec_uint_nv(&r->refs) == 0);
+}
 
 static ddi_dma_attr_t mfii_req_attr = {
 	DMA_ATTR_V0,		/* version of this structure */
@@ -422,15 +475,21 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	sc = ddi_get_soft_state(mfii_softc_p, instance);
 	sc->sc_dev = dip;
 
+	SIMPLEQ_INIT(&sc->sc_ccb_list);
+	TAILQ_INIT(&sc->sc_ptgt_list);
+	if (ddi_soft_state_bystr_init(&sc->sc_ptgt_lus,
+	    sizeof(struct mfii_pd_lu), 16) != 0)
+		goto free_sc;
+
 	if (mfii_pci_cfg(sc) != DDI_SUCCESS) {
 		/* error printed by mfii_pci_cfg */
-		goto free_sc;
+		goto free_lu;
 	}
 
 	if (ddi_regs_map_setup(dip, 2, &sc->sc_reg_baseaddr, 0, 0,
 	    &mfii_reg_attr, &sc->sc_reg_space) != DDI_SUCCESS) {
 		dev_err(dip, CE_WARN, "unable to map register space");
-		goto free_sc;
+		goto free_lu;
 	}
 
 	/* get a different mapping for the iqp */
@@ -456,6 +515,8 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	mutex_init(&sc->sc_iqp_mtx, NULL, MUTEX_DRIVER,
 	    sc->sc_iblock_cookie);
 	mutex_init(&sc->sc_ccb_mtx, NULL, MUTEX_DRIVER,
+	    sc->sc_iblock_cookie);
+	mutex_init(&sc->sc_ptgt_mtx, NULL, MUTEX_DRIVER,
 	    sc->sc_iblock_cookie);
 
 	/* disable interrupts */
@@ -564,12 +625,15 @@ free_reply_postq:
 free_sense:
 	mfii_dmamem_free(sc, sc->sc_sense);
 unmutex:
+	mutex_destroy(&sc->sc_ptgt_mtx);
 	mutex_destroy(&sc->sc_ccb_mtx);
 	mutex_destroy(&sc->sc_iqp_mtx);
 free_iqp:
 	ddi_regs_map_free(&sc->sc_iqp_space);
 free_regs:
 	ddi_regs_map_free(&sc->sc_reg_space);
+free_lu:
+	ddi_soft_state_bystr_fini(&sc->sc_ptgt_lus);
 free_sc:
 	ddi_soft_state_free(mfii_softc_p, instance);
 err:
@@ -604,10 +668,12 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	mfii_dmamem_free(sc, sc->sc_requests);
 	mfii_dmamem_free(sc, sc->sc_reply_postq);
 	mfii_dmamem_free(sc, sc->sc_sense);
+	mutex_destroy(&sc->sc_ptgt_mtx);
 	mutex_destroy(&sc->sc_ccb_mtx);
 	mutex_destroy(&sc->sc_iqp_mtx);
 	ddi_regs_map_free(&sc->sc_iqp_space);
 	ddi_regs_map_free(&sc->sc_reg_space);
+	ddi_soft_state_bystr_fini(&sc->sc_ptgt_lus);
 	ddi_soft_state_free(mfii_softc_p, instance);
 
 	return (DDI_SUCCESS);
@@ -934,6 +1000,9 @@ mfii_pd_probe_one(struct mfii_softc *sc, struct mfii_ccb *ccb, ushort_t tgt)
 	union mfi_mbox mbox;
 	int rv;
 
+	if (tgt == 0xffff)
+		return (DDI_FAILURE);
+
 	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pd),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
 
@@ -960,40 +1029,81 @@ done:
 static int
 mfii_pd_probe(struct mfii_softc *sc)
 {
-	struct mfii_dmamem *m;
+	struct mfii_dmamem *ldmm, *pdlm;
+	struct mfii_ld_map *ldm;
+	struct mfi_pd_list *pdl;
 	struct mfii_ccb *ccb;
-	struct mfi_pd_list *l;
 	char name[SCSI_MAXNAMELEN];
+	uint64_t wwpn;
 	int i, n;
-	ushort_t tgt;
 	int rv;
 
-	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*l),
+	pdlm = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pdl),
+	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
+	ldmm = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*ldm),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
 	ccb = mfii_ccb_get(sc);
 	VERIFY(ccb != NULL);
 
-	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, m);
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, pdlm);
 	if (rv != DDI_SUCCESS)
 		goto done;
 
-	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
-	l = MFII_DMA_KVA(m);
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_LD_MAP_GET_INFO, NULL, ldmm);
+	if (rv != DDI_SUCCESS)
+		goto done;
 
+	ddi_dma_sync(MFII_DMA_HANDLE(pdlm), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	ddi_dma_sync(MFII_DMA_HANDLE(ldmm), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	pdl = MFII_DMA_KVA(pdlm);
+	ldm = MFII_DMA_KVA(ldmm);
 
 	if (scsi_hba_tgtmap_set_begin(sc->sc_pd_map) != DDI_SUCCESS) {
 		dev_err(sc->sc_dev, CE_WARN, "failed begin tgtmap set on p0");
 		goto done;
 	}
 
-	n = LE_32(l->mpl_no_pd);
+	n = LE_32(pdl->mpl_no_pd);
 	for (i = 0; i < n; i++) {
-		tgt = LE_16(l->mpl_address[i].mpa_pd_id);
+		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
 
-		if (mfii_pd_probe_one(sc, ccb, tgt) != DDI_SUCCESS)
+		dev_err(sc->sc_dev, CE_NOTE, "id %u enc %u/%u/%u "
+		    "type %d port 0x%x sas %016lx %016lx",
+		    LE_16(mpa->mpa_pd_id), LE_16(mpa->mpa_enc_id),
+		    mpa->mpa_enc_index, mpa->mpa_enc_slot,
+		    mpa->mpa_scsi_type, mpa->mpa_port,
+		    LE_64(mpa->mpa_sas_address[0]),
+		    LE_64(mpa->mpa_sas_address[1]));
+
+		if (mfii_pd_probe_one(sc, ccb,
+		    LE_16(mpa->mpa_pd_id)) != DDI_SUCCESS)
 			continue;
 
-		snprintf(name, sizeof(name), "%x", tgt);
+		dev_err(sc->sc_dev, CE_NOTE, "%s[%u]", __func__, __LINE__);
+
+		/* XXX */
+		if (mpa->mpa_port >= 2)
+			continue;
+		wwpn = mpa->mpa_sas_address[mpa->mpa_port];
+
+		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx",
+		    __func__, __LINE__, LE_64(wwpn));
+
+		scsi_wwn_to_wwnstr(wwpn, 1, name);
+
+		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx %s",
+		    __func__, __LINE__, LE_64(wwpn), name);
+
+		if (mfii_pd_tgt_insert(sc, wwpn, mpa->mpa_pd_id,
+		    ldm->mlm_dev_handle[i].mdh_cur_handle) != DDI_SUCCESS) {
+			dev_err(sc->sc_dev, CE_WARN,
+			    "unable to insert tgt %s", name);
+			continue;
+		}
+
+		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx %s",
+		    __func__, __LINE__, LE_64(wwpn), name);
+
 		if (scsi_hba_tgtmap_set_add(sc->sc_pd_map,
 		    SCSI_TGT_SCSI_DEVICE, name, NULL) != DDI_SUCCESS) {
 			dev_err(sc->sc_dev, CE_WARN,
@@ -1008,7 +1118,8 @@ mfii_pd_probe(struct mfii_softc *sc)
 
 done:
 	mfii_ccb_put(sc, ccb);
-	mfii_dmamem_free(sc, m);
+	mfii_dmamem_free(sc, pdlm);
+	mfii_dmamem_free(sc, ldmm);
 
 	return (rv);
 }
@@ -1165,8 +1276,12 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 	} else if (strcmp(addr, "p0") == 0) {
 		map = &sc->sc_pd_map;
 		tran->tran_tgt_init = mfii_pd_tran_tgt_init;
+		tran->tran_tgt_free = mfii_pd_tran_tgt_free;
+		tran->tran_getcap = mfii_pd_tran_getcap;
 		tran->tran_start = mfii_pd_tran_start;
 		tran->tran_interconnect_type = INTERCONNECT_SAS;
+		/* XXX not sure if this is kosher */
+		tran->tran_hba_flags |= SCSI_HBA_ADDR_COMPLEX;
 
 		probe = mfii_pd_probe;
 	} else
@@ -1340,12 +1455,71 @@ mfii_ld_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
 }
 
 static int
+mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
+    uint16_t pd_id, uint16_t handle)
+{
+	struct mfii_pd_tgt *ptgt;
+
+	ptgt = kmem_zalloc(sizeof(*ptgt), KM_SLEEP);
+
+	refcnt_init(&ptgt->ptgt_refcnt);
+	ptgt->ptgt_wwn = wwpn;
+	ptgt->ptgt_id = pd_id;
+	ptgt->ptgt_handle = handle;
+
+	mutex_enter(&sc->sc_ptgt_mtx);
+	/* give ref to the list */
+	TAILQ_INSERT_TAIL(&sc->sc_ptgt_list, ptgt, ptgt_entry);
+	mutex_exit(&sc->sc_ptgt_mtx);
+
+	dev_err(sc->sc_dev, CE_NOTE, "%016lx id %u handle %u", wwpn,
+	    LE_16(pd_id), LE_16(handle));
+
+	return (DDI_SUCCESS);
+}
+
+static inline struct mfii_pd_tgt *
+mfii_pd_tgt_take(struct mfii_pd_tgt *ptgt)
+{
+	refcnt_take(&ptgt->ptgt_refcnt);
+	return (ptgt);
+}
+
+static inline struct mfii_pd_tgt *
+mfii_pd_tgt_lookup(struct mfii_softc *sc, const char *ua)
+{
+	char name[SCSI_MAXNAMELEN];
+	struct mfii_pd_tgt *ptgt;
+
+	mutex_enter(&sc->sc_ptgt_mtx);
+	TAILQ_FOREACH(ptgt, &sc->sc_ptgt_list, ptgt_entry) {
+		scsi_wwn_to_wwnstr(ptgt->ptgt_wwn, 1, name);
+		if (memcmp(ua, name, strlen(name)) == 0) {
+			mfii_pd_tgt_take(ptgt);
+			break;
+		}
+	}
+	mutex_exit(&sc->sc_ptgt_mtx);
+
+	return (ptgt);
+}
+
+static void
+mfii_pd_tgt_rele(struct mfii_pd_tgt *ptgt)
+{
+	if (refcnt_rele(&ptgt->ptgt_refcnt))
+		kmem_free(ptgt, sizeof(*ptgt));
+}
+
+static int
 mfii_pd_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
     scsi_hba_tran_t *tran, struct scsi_device *sd)
 {
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+	struct mfii_pd_tgt *ptgt;
+	struct mfii_pd_lu *plu;
 	const char *ua;
-	ushort_t tgt;
-	uchar_t lun;
+	uint64_t lun;
 
 	VERIFY(scsi_hba_iport_unit_address(dip) != NULL);
 
@@ -1353,13 +1527,55 @@ mfii_pd_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
 	if (ua == NULL)
 		return (DDI_FAILURE);
 
-	if (mfii_parse_ua(ua, &tgt, &lun) != DDI_SUCCESS)
+	lun = scsi_device_prop_get_int64(sd, SCSI_DEVICE_PROP_PATH,
+	    SCSI_ADDR_PROP_LUN64, SCSI_LUN64_ILLEGAL);
+	if (lun == SCSI_LUN64_ILLEGAL)
 		return (DDI_FAILURE);
 
-	sd->sd_address.a_target = tgt;
-	sd->sd_address.a_lun = lun;
+	dev_err(sc->sc_dev, CE_NOTE, "probe %s/%lx", ua, lun);
+
+	ptgt = mfii_pd_tgt_lookup(sc, ua);
+	if (ptgt == NULL)
+		return (DDI_FAILURE);
+
+	if (scsi_device_prop_update_byte_array(sd, SCSI_DEVICE_PROP_DEVICE,
+	    "port-wwn", (uchar_t *)&ptgt->ptgt_wwn,
+	    sizeof(ptgt->ptgt_wwn)) != DDI_PROP_SUCCESS)
+		goto rele;
+
+	if (ddi_soft_state_bystr_zalloc(sc->sc_ptgt_lus, ua) != DDI_SUCCESS)
+		goto rele;
+
+	plu = ddi_soft_state_bystr_get(sc->sc_ptgt_lus, ua);
+	if (plu == NULL)
+		goto rele;
+
+	plu->plu_tgt = ptgt; /* give ref to plu */
+	plu->plu_lun = lun;
+
+	scsi_device_hba_private_set(sd, plu);
 
 	return (DDI_SUCCESS);
+
+rele:
+	mfii_pd_tgt_rele(ptgt);
+	return (DDI_FAILURE);
+}
+
+static void
+mfii_pd_tran_tgt_free(dev_info_t *dip, dev_info_t *tgt_dip,
+    scsi_hba_tran_t *tran, struct scsi_device *sd)
+{
+	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
+	struct mfii_pd_lu *plu;
+	const char *ua;
+
+	ua = scsi_device_unit_address(sd);
+	plu = scsi_device_hba_private_get(sd);
+
+	mfii_pd_tgt_rele(plu->plu_tgt);
+
+	ddi_soft_state_bystr_free(sc->sc_ptgt_lus, ua);
 }
 
 static int
@@ -1386,6 +1602,35 @@ mfii_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 	}
 
 	return (-1);
+}
+
+static int
+mfii_pd_tran_getcap(struct scsi_address *ap, char *cap, int whom)
+{
+	int index;
+
+	index = scsi_hba_lookup_capstr(cap);
+	if (index == DDI_FAILURE)
+		return (-1);
+
+	//DTRACE_PROBE1(getcap_index, int, index);
+
+	if (cap == NULL || whom == 0)
+		return (-1);
+
+	switch (index) {
+	case SCSI_CAP_ARQ:
+	case SCSI_CAP_TAGGED_QING:
+	case SCSI_CAP_UNTAGGED_QING:
+		return (1);
+	case SCSI_CAP_INTERCONNECT_TYPE:
+		return (INTERCONNECT_SAS);
+	default:
+		break;
+	}
+
+	return (-1);
+
 }
 
 static int
@@ -1576,12 +1821,22 @@ static int
 mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 {
 	scsi_hba_tran_t *tran = pkt->pkt_address.a_hba_tran;
+	struct scsi_device *sd;
 	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
 	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
 	struct mfii_ccb *ccb = mp->mp_ccb;
+	struct mfii_pd_lu *plu;
+	struct mfii_pd_tgt *ptgt;
 	struct mpii_msg_scsi_io *io = ccb->ccb_request;
 	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
 	size_t datalen;
+
+	sd = scsi_address_device(ap);
+	VERIFY(sd != NULL);
+	plu = scsi_device_hba_private_get(sd);
+	VERIFY(plu != NULL);
+	ptgt = plu->plu_tgt;
+	VERIFY(ptgt != NULL);
 
 	if (pkt->pkt_numcookies > sc->sc_max_sgl)
 		return (TRAN_BADPKT);
@@ -1592,7 +1847,7 @@ mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 	datalen = mfii_sgl(sc, ccb, ctx + 1,
 	    pkt->pkt_cookies, pkt->pkt_numcookies);
 
-	io->dev_handle = LE_16(ap->a_target);
+	io->dev_handle = ptgt->ptgt_handle;
 	io->function = 0;
 	io->sense_buffer_low_address = LE_32(ccb->ccb_sense_dva);
 	io->sgl_flags = LE_16(MFI_FRAME_SGL64);
@@ -1600,7 +1855,7 @@ mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 	io->sgl_offset0 = (sizeof(*io) + sizeof(*ctx)) / 4;
 	io->data_length = LE_32(datalen);
 	io->io_flags = LE_16(pkt->pkt_cdblen);
-	io->lun[0] = BE_16(ap->a_lun);
+	memcpy(io->lun, &plu->plu_lun, sizeof(io->lun));
 	memcpy(io->cdb, pkt->pkt_cdbp, pkt->pkt_cdblen);
 
 	io->direction = MPII_SCSIIO_DIR_NONE;
@@ -1611,7 +1866,7 @@ mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 			io->direction = MPII_SCSIIO_DIR_WRITE;
 	}
 
-	ctx->type_nseg = sc->sc_iop->ldio_ctx_type_nseg;
+	ctx->virtual_disk_target_id = ptgt->ptgt_id;
 	ctx->raid_flags = MFII_RAID_CTX_IO_TYPE_SYSPD;
 	ctx->timeout_value = LE_16(pkt->pkt_time);
 	ctx->num_sge = pkt->pkt_numcookies;
@@ -1619,7 +1874,7 @@ mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 	memset(&ccb->ccb_req, 0, sizeof(ccb->ccb_req));
 	ccb->ccb_req.flags = MFII_REQ_TYPE_HI_PRI;
 	ccb->ccb_req.smid = LE_16(ccb->ccb_smid);
-	ccb->ccb_req.dev_handle = LE_16(ap->a_target);
+	ccb->ccb_req.dev_handle = ptgt->ptgt_handle;
 
 	pkt->pkt_resid = 0;
 	pkt->pkt_reason = CMD_CMPLT;
