@@ -1084,20 +1084,12 @@ mfii_pd_probe(struct mfii_softc *sc)
 		    LE_16(mpa->mpa_pd_id)) != DDI_SUCCESS)
 			continue;
 
-		dev_err(sc->sc_dev, CE_NOTE, "%s[%u]", __func__, __LINE__);
-
 		/* XXX */
 		if (mpa->mpa_port >= 2)
 			continue;
 		wwpn = mpa->mpa_sas_address[mpa->mpa_port];
 
-		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx",
-		    __func__, __LINE__, LE_64(wwpn));
-
 		scsi_wwn_to_wwnstr(wwpn, 1, name);
-
-		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx %s",
-		    __func__, __LINE__, LE_64(wwpn), name);
 
 		if (mfii_pd_tgt_insert(sc, wwpn, mpa->mpa_pd_id,
 		    ldm->mlm_dev_handle[i].mdh_cur_handle) != DDI_SUCCESS) {
@@ -1105,9 +1097,6 @@ mfii_pd_probe(struct mfii_softc *sc)
 			    "unable to insert tgt %s", name);
 			continue;
 		}
-
-		dev_err(sc->sc_dev, CE_NOTE, "%s[%u] %016lx %s",
-		    __func__, __LINE__, LE_64(wwpn), name);
 
 		if (scsi_hba_tgtmap_set_add(sc->sc_pd_map,
 		    SCSI_TGT_SCSI_DEVICE, name, NULL) != DDI_SUCCESS) {
@@ -1536,8 +1525,6 @@ mfii_pd_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
 	    SCSI_ADDR_PROP_LUN64, SCSI_LUN64_ILLEGAL);
 	if (lun == SCSI_LUN64_ILLEGAL)
 		return (DDI_FAILURE);
-
-	dev_err(sc->sc_dev, CE_NOTE, "probe %s/%lx", ua, lun);
 
 	ptgt = mfii_pd_tgt_lookup(sc, ua);
 	if (ptgt == NULL)
