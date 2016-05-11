@@ -1537,11 +1537,6 @@ mfii_pd_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
 	if (ptgt == NULL)
 		return (DDI_FAILURE);
 
-	if (scsi_device_prop_update_byte_array(sd, SCSI_DEVICE_PROP_DEVICE,
-	    "port-wwn", (uchar_t *)&ptgt->ptgt_wwn,
-	    sizeof(ptgt->ptgt_wwn)) != DDI_PROP_SUCCESS)
-		goto rele;
-
 	if (ddi_soft_state_bystr_zalloc(sc->sc_ptgt_lus, ua) != DDI_SUCCESS)
 		goto rele;
 
