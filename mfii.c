@@ -30,6 +30,7 @@
 #include <sys/scsi/scsi.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sys/ksynch.h>
 #include <sys/queue.h>
 #include <sys/atomic.h>
 
@@ -87,6 +88,7 @@ struct mfii_dmamem {
 
 struct mfii_softc;
 struct mfii_pkt;
+struct mfii_ccb_sleep;
 
 struct mfii_ccb {
 	void			*ccb_request;
@@ -177,6 +179,8 @@ struct mfii_softc {
 	struct mfii_ccb		*sc_ccbs;
 	struct mfii_ccb_list	sc_ccb_list;
 	kmutex_t		sc_ccb_mtx;
+	TAILQ_HEAD(, mfii_ccb_sleep)
+				sc_ccb_sleepers;
 
 	scsi_hba_tran_t		*sc_tran;
 
@@ -213,7 +217,7 @@ static int		mfii_fw_info(struct mfii_softc *);
 
 static int		mfii_ccbs_ctor(struct mfii_softc *);
 static struct mfii_ccb *
-			mfii_ccb_get(struct mfii_softc *);
+			mfii_ccb_get(struct mfii_softc *, int);
 static void
 			mfii_ccb_put(struct mfii_softc *, struct mfii_ccb *);
 static void		mfii_ccbs_dtor(struct mfii_softc *);
@@ -477,6 +481,7 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	SIMPLEQ_INIT(&sc->sc_ccb_list);
 	TAILQ_INIT(&sc->sc_ptgt_list);
+	TAILQ_INIT(&sc->sc_ccb_sleepers);
 	if (ddi_soft_state_bystr_init(&sc->sc_ptgt_lus,
 	    sizeof(struct mfii_pd_lu), 16) != 0)
 		goto free_sc;
@@ -900,7 +905,7 @@ mfii_fw_init(struct mfii_softc *sc)
 
 	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORDEV);
 
-	ccb = mfii_ccb_get(sc);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
 	VERIFY(ccb != NULL);
 	init = ccb->ccb_request;
 
@@ -925,7 +930,7 @@ mfii_fw_info(struct mfii_softc *sc)
 
 	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(sc->sc_info),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
-	ccb = mfii_ccb_get(sc);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
 	VERIFY(ccb != NULL);
 
 	rv = mfii_dcmd(sc, ccb, MR_DCMD_CTRL_GET_INFO, NULL, m);
@@ -954,7 +959,7 @@ mfii_ld_probe(struct mfii_softc *sc)
 
 	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*l),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
-	ccb = mfii_ccb_get(sc);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
 	VERIFY(ccb != NULL);
 
 	rv = mfii_dcmd(sc, ccb, MR_DCMD_LD_GET_LIST, NULL, m);
@@ -1042,7 +1047,7 @@ mfii_pd_probe(struct mfii_softc *sc)
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
 	ldmm = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*ldm),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
-	ccb = mfii_ccb_get(sc);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
 	VERIFY(ccb != NULL);
 
 	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, pdlm);
@@ -1667,14 +1672,14 @@ mfii_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 	struct mfii_softc *sc = (struct mfii_softc *)tran->tran_hba_private;
 	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
 	struct mfii_ccb *ccb;
-	//int kmflags = callback == SLEEP_FUNC ? KM_SLEEP : KM_NOSLEEP;
+	int kmflags = callback == SLEEP_FUNC ? KM_SLEEP : KM_NOSLEEP;
 
 	if (pkt->pkt_cdblen > MPII_CDB_LEN)
 		return (-1);
 	if (pkt->pkt_scblen > sizeof(*ccb->ccb_sense))
 		return (-1);
 
-	ccb = mfii_ccb_get(sc);
+	ccb = mfii_ccb_get(sc, kmflags);
 	if (ccb == NULL)
 		return (-1);
 
@@ -2086,15 +2091,37 @@ mfii_ccbs_dtor(struct mfii_softc *sc)
 	kmem_free(sc->sc_ccbs, sc->sc_max_cmds * sizeof(*ccb));
 }
 
+struct mfii_ccb_sleep {
+	kcondvar_t			s_cv;
+	struct mfii_ccb			*s_ccb;
+	TAILQ_ENTRY(mfii_ccb_sleep)	s_entry;
+};
+
 static struct mfii_ccb *
-mfii_ccb_get(struct mfii_softc *sc)
+mfii_ccb_get(struct mfii_softc *sc, int sleep)
 {
+	struct mfii_ccb_sleep s;
 	struct mfii_ccb *ccb;
 
 	mutex_enter(&sc->sc_ccb_mtx);
 	ccb = SIMPLEQ_FIRST(&sc->sc_ccb_list);
 	if (ccb != NULL)
 		SIMPLEQ_REMOVE_HEAD(&sc->sc_ccb_list, ccb_entry);
+	else if (sleep == KM_SLEEP) {
+		dev_err(sc->sc_dev, CE_NOTE, "%s sleeping", __func__);
+		cv_init(&s.s_cv, "mfiiccb", CV_DRIVER, NULL);
+		s.s_ccb = NULL;
+
+		TAILQ_INSERT_TAIL(&sc->sc_ccb_sleepers, &s, s_entry);
+
+		do
+			cv_wait(&s.s_cv, &sc->sc_ccb_mtx);
+		while (s.s_ccb == NULL);
+
+		cv_destroy(&s.s_cv);
+
+		ccb = s.s_ccb;
+	}
 	mutex_exit(&sc->sc_ccb_mtx);
 
 	return (ccb);
@@ -2103,8 +2130,16 @@ mfii_ccb_get(struct mfii_softc *sc)
 static void
 mfii_ccb_put(struct mfii_softc *sc, struct mfii_ccb *ccb)
 {
+	struct mfii_ccb_sleep *s;
+
 	mutex_enter(&sc->sc_ccb_mtx);
-	SIMPLEQ_INSERT_HEAD(&sc->sc_ccb_list, ccb, ccb_entry);
+	s = TAILQ_FIRST(&sc->sc_ccb_sleepers);
+	if (s != NULL) {
+		TAILQ_REMOVE(&sc->sc_ccb_sleepers, s, s_entry);
+		s->s_ccb = ccb;
+		cv_signal(&s->s_cv);
+	} else
+		SIMPLEQ_INSERT_HEAD(&sc->sc_ccb_list, ccb, ccb_entry);
 	mutex_exit(&sc->sc_ccb_mtx);
 }
 
