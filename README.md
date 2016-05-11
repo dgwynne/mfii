@@ -14,7 +14,6 @@ styles of controller in a single driver.
 # Todo
 
 - `tran_abort()` implementation for aborting in flight SCSI commands
-- Sleeping for access to controller command slots
 - Asynchronous Event Notification (AEN) support
 - Hotplug support (relies on AEN)
 - Fault Management (FM) infrastructure
