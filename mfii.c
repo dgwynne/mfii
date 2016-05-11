@@ -1080,6 +1080,13 @@ mfii_pd_probe(struct mfii_softc *sc)
 		    LE_64(mpa->mpa_sas_address[0]),
 		    LE_64(mpa->mpa_sas_address[1]));
 
+		dev_err(sc->sc_dev, CE_NOTE, "cur handle %x valid %x "
+		    "handles %x %x",
+		    LE_16(ldm->mlm_dev_handle[i].mdh_cur_handle),
+		    ldm->mlm_dev_handle[i].mdh_valid,
+		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[0]),
+		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
+
 		if (mfii_pd_probe_one(sc, ccb,
 		    LE_16(mpa->mpa_pd_id)) != DDI_SUCCESS)
 			continue;
