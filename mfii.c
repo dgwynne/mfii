@@ -1676,8 +1676,6 @@ mfii_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 
 	if (pkt->pkt_cdblen > MPII_CDB_LEN)
 		return (-1);
-	if (pkt->pkt_scblen > sizeof(*ccb->ccb_sense))
-		return (-1);
 
 	ccb = mfii_ccb_get(sc, kmflags);
 	if (ccb == NULL)
@@ -1983,21 +1981,24 @@ mfii_tran_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	struct scsi_pkt *pkt = mp->mp_pkt;
 	struct mpii_msg_scsi_io *io = ccb->ccb_request;
 	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
-	struct scsi_arq_status *arqstat;
+	struct scsi_arq_status *arq;
 
 	switch (ctx->status) {
 	case MFI_STAT_SCSI_DONE_WITH_ERROR:
-		pkt->pkt_state |= STATE_GOT_STATUS | STATE_ARQ_DONE;
+		if (pkt->pkt_scblen >= sizeof(*arq)) {
+			pkt->pkt_state |= STATE_GOT_STATUS | STATE_ARQ_DONE;
 
-		arqstat = (struct scsi_arq_status *)pkt->pkt_scbp;
-		arqstat->sts_rqpkt_reason = CMD_CMPLT;
-		arqstat->sts_rqpkt_resid = 0;
-		arqstat->sts_rqpkt_state = STATE_GOT_BUS | STATE_GOT_TARGET |
-		    STATE_SENT_CMD | STATE_XFERRED_DATA;
-		arqstat->sts_rqpkt_statistics = 0;
+			arq = (struct scsi_arq_status *)pkt->pkt_scbp;
+			arq->sts_rqpkt_reason = CMD_CMPLT;
+			arq->sts_rqpkt_resid = 0;
+			arq->sts_rqpkt_state = STATE_GOT_BUS |
+			    STATE_GOT_TARGET | STATE_SENT_CMD |
+			    STATE_XFERRED_DATA;
+			arq->sts_rqpkt_statistics = 0;
 
-		memcpy(&arqstat->sts_sensedata, ccb->ccb_sense,
-		    sizeof(arqstat->sts_sensedata));
+			memcpy(&arq->sts_sensedata, ccb->ccb_sense,
+			    sizeof(arq->sts_sensedata));
+		}
 
 		/* FALLTHROUGH */
 	case MFI_STAT_OK:
