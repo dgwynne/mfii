@@ -2109,7 +2109,6 @@ mfii_ccb_get(struct mfii_softc *sc, int sleep)
 	if (ccb != NULL)
 		SIMPLEQ_REMOVE_HEAD(&sc->sc_ccb_list, ccb_entry);
 	else if (sleep == KM_SLEEP) {
-		dev_err(sc->sc_dev, CE_NOTE, "%s sleeping", __func__);
 		cv_init(&s.s_cv, "mfiiccb", CV_DRIVER, NULL);
 		s.s_ccb = NULL;
 
