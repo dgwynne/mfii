@@ -1591,6 +1591,8 @@ mfii_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 	case SCSI_CAP_TAGGED_QING:
 	case SCSI_CAP_UNTAGGED_QING:
 		return (1);
+	case SCSI_CAP_CDB_LEN:
+		return (MPII_CDB_LEN);
 	default:
 		break;
 	}
@@ -1617,6 +1619,8 @@ mfii_pd_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 	case SCSI_CAP_TAGGED_QING:
 	case SCSI_CAP_UNTAGGED_QING:
 		return (1);
+	case SCSI_CAP_CDB_LEN:
+		return (MPII_CDB_LEN);
 	case SCSI_CAP_INTERCONNECT_TYPE:
 		return (INTERCONNECT_SAS);
 	default:
@@ -1662,9 +1666,6 @@ mfii_tran_setup_pkt(struct scsi_pkt *pkt, int (*callback)(caddr_t),
 	struct mfii_pkt *mp = (struct mfii_pkt *)pkt->pkt_ha_private;
 	struct mfii_ccb *ccb;
 	int kmflags = callback == SLEEP_FUNC ? KM_SLEEP : KM_NOSLEEP;
-
-	if (pkt->pkt_cdblen > MPII_CDB_LEN)
-		return (-1);
 
 	ccb = mfii_ccb_get(sc, kmflags);
 	if (ccb == NULL)
@@ -1761,6 +1762,8 @@ mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 	struct mfii_ccb *ccb = mp->mp_ccb;
 	union scsi_cdb *cdb;
 
+	if (pkt->pkt_cdblen > MPII_CDB_LEN)
+		return (TRAN_BADPKT);
 	if (pkt->pkt_numcookies > sc->sc_max_sgl)
 		return (TRAN_BADPKT);
 
@@ -1830,6 +1833,8 @@ mfii_pd_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 	ptgt = plu->plu_tgt;
 	VERIFY(ptgt != NULL);
 
+	if (pkt->pkt_cdblen > MPII_CDB_LEN)
+		return (TRAN_BADPKT);
 	if (pkt->pkt_numcookies > sc->sc_max_sgl)
 		return (TRAN_BADPKT);
 
