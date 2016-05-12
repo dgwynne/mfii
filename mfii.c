@@ -2033,7 +2033,7 @@ mfii_start(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	mutex_enter(&sc->sc_iqp_mutex);
 	ddi_put32(sc->sc_iqp_space, 0, r[0]);
 	ddi_put32(sc->sc_iqp_space, MFI_IQPH - MFI_IQPH, r[1]);
-	mutex_leave(&sc->sc_iqp_mtx);
+	mutex_exit(&sc->sc_iqp_mtx);
 #endif
 }
 
