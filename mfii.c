@@ -162,6 +162,7 @@ struct mfii_softc {
 	ddi_acc_handle_t	sc_iqp_space;
 	u_long			*sc_iqp;
 	kmutex_t		sc_iqp_mtx;
+	kmutex_t		sc_mfa_mtx;
 
 	uint_t			sc_max_cmds;
 	uint_t			sc_max_sgl;
@@ -519,6 +520,8 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	mutex_init(&sc->sc_iqp_mtx, NULL, MUTEX_DRIVER,
 	    sc->sc_iblock_cookie);
+	mutex_init(&sc->sc_mfa_mtx, NULL, MUTEX_DRIVER,
+	    sc->sc_iblock_cookie);
 	mutex_init(&sc->sc_ccb_mtx, NULL, MUTEX_DRIVER,
 	    sc->sc_iblock_cookie);
 	mutex_init(&sc->sc_ptgt_mtx, NULL, MUTEX_DRIVER,
@@ -632,6 +635,7 @@ free_sense:
 unmutex:
 	mutex_destroy(&sc->sc_ptgt_mtx);
 	mutex_destroy(&sc->sc_ccb_mtx);
+	mutex_destroy(&sc->sc_mfa_mtx);
 	mutex_destroy(&sc->sc_iqp_mtx);
 free_iqp:
 	ddi_regs_map_free(&sc->sc_iqp_space);
@@ -675,6 +679,7 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	mfii_dmamem_free(sc, sc->sc_sense);
 	mutex_destroy(&sc->sc_ptgt_mtx);
 	mutex_destroy(&sc->sc_ccb_mtx);
+	mutex_destroy(&sc->sc_mfa_mtx);
 	mutex_destroy(&sc->sc_iqp_mtx);
 	ddi_regs_map_free(&sc->sc_iqp_space);
 	ddi_regs_map_free(&sc->sc_reg_space);
@@ -1167,6 +1172,7 @@ mfii_mfa_poll(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	r = MFII_REQ_MFA(ccb->ccb_request_dva);
 	memcpy(&ccb->ccb_req, &r, sizeof(ccb->ccb_req));
 
+	mutex_enter(&sc->sc_mfa_mtx);
 	mfii_start(sc, ccb);
 
 	for (;;) {
@@ -1185,6 +1191,7 @@ mfii_mfa_poll(struct mfii_softc *sc, struct mfii_ccb *ccb)
 
 		delay(drv_usectohz(1000));
 	}
+	mutex_exit(&sc->sc_mfa_mtx);
 
 	return (rv);
 }
