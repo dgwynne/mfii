@@ -132,6 +132,7 @@
 #define MR_DCMD_PD_UNBLINK			0x02070200
 #define MR_DCMD_PD_GET_ALLOWED_OPS_LIST		0x020a0100
 #define MR_DCMD_LD_GET_LIST			0x03010000
+#define MR_DCMD_LD_LIST_QUERY			0x03010100
 #define MR_DCMD_LD_GET_INFO			0x03020000
 #define MR_DCMD_LD_GET_PROPERTIES		0x03030000
 #define MR_DCMD_LD_SET_PROPERTIES		0x03040000
@@ -286,6 +287,7 @@ typedef enum {
 #define MFI_DEFAULT_ID				-1
 #define MFI_MAX_LUN				8
 #define MFI_MAX_LD				64
+#define MFI_MAX_LD_EXT				256
 #define MFI_MAX_SPAN				8
 #define MFI_MAX_ARRAY_DEDICATED			16
 #define MFI_MAX_PD				256
@@ -781,6 +783,14 @@ struct mfi_ld_list {
 		uint8_t		mll_res4;
 		uint64_t	mll_size;
 	} mll_list[MFI_MAX_LD];
+} __packed;
+
+/* MR_DCMD_LD_LIST_QUERY */
+struct mfi_ld_targetid_list {
+	uint32_t		mlt_size;
+	uint32_t		mlt_count;
+	uint8_t			_reserved[3];
+	uint8_t			mlt_id[MFI_MAX_LD_EXT];
 } __packed;
 
 /* logicl disk details from MR_DCMD_LD_GET_INFO */
