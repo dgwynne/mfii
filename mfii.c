@@ -1184,7 +1184,8 @@ mfii_mfa_poll(struct mfii_softc *sc, struct mfii_ccb *ccb)
 			break;
 
 		if (to++ > 5000) { /* XXX 5 seconds busywait sucks */
-			cmn_err(CE_WARN, "timeout on ccb %u", ccb->ccb_smid);
+			dev_err(sc->sc_dev, CE_WARN, "timeout on ccb %u (%x)",
+			    ccb->ccb_smid, hdr->mfh_cmd);
 			rv = DDI_FAILURE;
 			break;
 		}
