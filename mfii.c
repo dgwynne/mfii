@@ -1481,9 +1481,6 @@ mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
 	TAILQ_INSERT_TAIL(&sc->sc_ptgt_list, ptgt, ptgt_entry);
 	mutex_exit(&sc->sc_ptgt_mtx);
 
-	dev_err(sc->sc_dev, CE_NOTE, "%016lx id %u handle %u", wwpn,
-	    LE_16(pd_id), LE_16(handle));
-
 	return (DDI_SUCCESS);
 }
 
