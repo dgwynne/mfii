@@ -1074,6 +1074,7 @@ mfii_pd_probe(struct mfii_softc *sc)
 	for (i = 0; i < n; i++) {
 		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
 
+#if 0
 		dev_err(sc->sc_dev, CE_NOTE, "id %u enc %u/%u/%u "
 		    "type %d port 0x%x sas %016lx %016lx",
 		    LE_16(mpa->mpa_pd_id), LE_16(mpa->mpa_enc_id),
@@ -1088,6 +1089,7 @@ mfii_pd_probe(struct mfii_softc *sc)
 		    ldm->mlm_dev_handle[i].mdh_valid,
 		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[0]),
 		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
+#endif
 
 		if (!ldm->mlm_dev_handle[i].mdh_valid)
 			continue;
