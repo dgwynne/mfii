@@ -1010,9 +1010,6 @@ mfii_pd_probe_one(struct mfii_softc *sc, struct mfii_ccb *ccb, ushort_t tgt)
 	union mfi_mbox mbox;
 	int rv;
 
-	if (tgt == 0xffff)
-		return (DDI_FAILURE);
-
 	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pd),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
 
@@ -1092,7 +1089,19 @@ mfii_pd_probe(struct mfii_softc *sc)
 		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[0]),
 		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
 
-		if (mfii_pd_probe_one(sc, ccb,
+		if (!ldm->mlm_dev_handle[i].mdh_valid)
+			continue;
+
+#if 0
+		/* only allow access to disks */
+		if (mpa->mpa_scsi_type != DTYPE_DIRECT) {
+			dev_err(sc->sc_dev, CE_NOTE, "skipping");
+			continue;
+		}
+#endif
+
+		if (mpa->mpa_scsi_type == DTYPE_DIRECT &&
+		    mfii_pd_probe_one(sc, ccb,
 		    LE_16(mpa->mpa_pd_id)) != DDI_SUCCESS)
 			continue;
 
