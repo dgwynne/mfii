@@ -96,7 +96,7 @@ struct mfii_ccb {
 	off_t			ccb_request_offset;
 
 	struct mfi_sense	*ccb_sense;
-	uint32_t		ccb_sense_dva;
+	uint64_t		ccb_sense_dva;
 	off_t			ccb_sense_offset;
 
 	struct mfii_sge		*ccb_sgl;
@@ -2081,7 +2081,7 @@ mfii_ccbs_ctor(struct mfii_softc *sc)
 		/* select i'th sense */
 		ccb->ccb_sense_offset = sizeof(*ccb->ccb_sense) * i;
 		ccb->ccb_sense = &sense[i];
-		ccb->ccb_sense_dva = (uint32_t)(MFII_DMA_DVA(sc->sc_sense) +
+		ccb->ccb_sense_dva = (MFII_DMA_DVA(sc->sc_sense) +
 		    ccb->ccb_sense_offset);
 
 		/* select i'th sgl */
