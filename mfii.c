@@ -2024,6 +2024,10 @@ mfii_tran_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
 		pkt->pkt_reason = CMD_DEV_GONE;
 		break;
 
+	case MFI_STAT_SCSI_IO_FAILED:
+		pkt->pkt_reason = CMD_TRAN_ERR;
+		break;
+
 	default:
 		dev_err(sc->sc_dev, CE_WARN, "%s: status 0x%x", __func__,
 		    ctx->status);
