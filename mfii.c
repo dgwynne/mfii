@@ -974,25 +974,15 @@ mfii_ld_probe(struct mfii_softc *sc)
 	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
 	l = MFII_DMA_KVA(m);
 
-	if (scsi_hba_tgtmap_set_begin(sc->sc_ld_map) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN, "failed begin tgtmap set on v0");
-		goto done;
-	}
-
 	n = LE_32(l->mll_no_ld);
 	for (i = 0; i < n; i++) {
 		snprintf(name, sizeof(name), "%x",
 		    l->mll_list[i].mll_ld.mld_target);
-		if (scsi_hba_tgtmap_set_add(sc->sc_ld_map,
+		if (scsi_hba_tgtmap_tgt_add(sc->sc_ld_map,
 		    SCSI_TGT_SCSI_DEVICE, name, NULL) != DDI_SUCCESS) {
 			dev_err(sc->sc_dev, CE_WARN,
 			    "failed to add %s on v0", name);
 		}
-	}
-
-	if (scsi_hba_tgtmap_set_end(sc->sc_ld_map, 0) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN, "failed end tgtmap set on v0");
-		goto done;
 	}
 
 done:
@@ -1065,11 +1055,6 @@ mfii_pd_probe(struct mfii_softc *sc)
 	pdl = MFII_DMA_KVA(pdlm);
 	ldm = MFII_DMA_KVA(ldmm);
 
-	if (scsi_hba_tgtmap_set_begin(sc->sc_pd_map) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN, "failed begin tgtmap set on p0");
-		goto done;
-	}
-
 	n = LE_32(pdl->mpl_no_pd);
 	for (i = 0; i < n; i++) {
 		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
@@ -1121,16 +1106,11 @@ mfii_pd_probe(struct mfii_softc *sc)
 			continue;
 		}
 
-		if (scsi_hba_tgtmap_set_add(sc->sc_pd_map,
+		if (scsi_hba_tgtmap_tgt_add(sc->sc_pd_map,
 		    SCSI_TGT_SCSI_DEVICE, name, NULL) != DDI_SUCCESS) {
 			dev_err(sc->sc_dev, CE_WARN,
 			    "failed to add %s on p0", name);
 		}
-	}
-
-	if (scsi_hba_tgtmap_set_end(sc->sc_pd_map, 0) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN, "failed end tgtmap set on p0");
-		goto done;
 	}
 
 done:
@@ -1307,7 +1287,7 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 	} else
 		return (DDI_FAILURE);
 
-	if (scsi_hba_tgtmap_create(iport_dip, SCSI_TM_FULLSET,
+	if (scsi_hba_tgtmap_create(iport_dip, SCSI_TM_PERADDR,
 	    MICROSEC, MICROSEC * 2, sc,
 	    mfii_tgtmap_activate_cb, mfii_tgtmap_deactivate_cb,
 	    map) != DDI_SUCCESS)
