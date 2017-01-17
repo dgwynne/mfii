@@ -2095,7 +2095,6 @@ struct mfii_ccb_sleep {
 static struct mfii_ccb *
 mfii_ccb_get(struct mfii_softc *sc, int sleep)
 {
-	struct mfii_ccb_sleep s;
 	struct mfii_ccb *ccb;
 
 	mutex_enter(&sc->sc_ccb_mtx);
@@ -2103,6 +2102,8 @@ mfii_ccb_get(struct mfii_softc *sc, int sleep)
 	if (ccb != NULL)
 		SIMPLEQ_REMOVE_HEAD(&sc->sc_ccb_list, ccb_entry);
 	else if (sleep == KM_SLEEP) {
+		struct mfii_ccb_sleep s;
+
 		cv_init(&s.s_cv, "mfiiccb", CV_DRIVER, NULL);
 		s.s_ccb = NULL;
 
