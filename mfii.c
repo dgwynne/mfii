@@ -283,7 +283,7 @@ static int		mfii_pd_tgt_insert(struct mfii_softc *, uint64_t,
 			    uint16_t, uint16_t);
 static void		mfii_pd_tgt_rele(struct mfii_pd_tgt *);
 static struct mfii_pd_tgt *
-			mfii_pd_tgt_lookup(struct mfii_softc *sc, const char *);
+			mfii_pd_tgt_lookup(struct mfii_softc *, const char *);
 
 static inline void
 refcnt_init(struct refcnt *r)
