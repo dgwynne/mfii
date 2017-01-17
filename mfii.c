@@ -193,6 +193,8 @@ struct mfii_softc {
 	TAILQ_HEAD(, mfii_pd_tgt)
 				sc_ptgt_list;
 
+	ddi_taskq_t		*sc_taskq;
+
 	struct mfi_ctrl_info	sc_info;
 };
 
@@ -618,10 +620,17 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto ccb_dtor;
 	}
 
+	sc->sc_taskq = ddi_taskq_create(sc->sc_dev, "mfiitq", 1,
+	    TASKQ_DEFAULTPRI, 0);
+	if (sc->sc_taskq == NULL) {
+		cmn_err(CE_NOTE, "unable to create taskq");
+		goto ccb_dtor;
+	}
+
 	if (ddi_add_intr(sc->sc_dev, 0, &sc->sc_iblock_cookie, NULL,
 	    mfii_intr, (caddr_t)sc) != DDI_SUCCESS) {
 		cmn_err(CE_NOTE, "unable to establish interrupt");
-		goto ccb_dtor;
+		goto taskq_dtor;
 	}
 
 	/* enable interrupts */
@@ -648,6 +657,8 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	return (DDI_SUCCESS);
 del_intr:
 	ddi_remove_intr(sc->sc_dev, 0, sc->sc_iblock_cookie);
+taskq_dtor:
+	ddi_taskq_destroy(sc->sc_taskq);
 ccb_dtor:
 	mfii_ccbs_dtor(sc);
 free_sgls:
@@ -697,6 +708,7 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	sc = ddi_get_soft_state(mfii_softc_p, instance);
 
 	mfii_hba_detach(sc);
+	ddi_taskq_destroy(sc->sc_taskq);
 	ddi_remove_intr(sc->sc_dev, 0, sc->sc_iblock_cookie);
 	mfii_ccbs_dtor(sc);
 	mfii_dmamem_free(sc, sc->sc_sgl);
