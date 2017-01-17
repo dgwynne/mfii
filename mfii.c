@@ -1472,7 +1472,7 @@ mfii_ld_tran_tgt_init(dev_info_t *dip, dev_info_t *tgt_dip,
 
 static int
 mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
-    uint16_t pd_id, uint16_t handle)
+    uint16_t pd_id, uint16_t pd_handle)
 {
 	struct mfii_pd_tgt *ptgt;
 
@@ -1481,7 +1481,7 @@ mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
 	refcnt_init(&ptgt->ptgt_refcnt);
 	ptgt->ptgt_wwn = wwpn;
 	ptgt->ptgt_id = pd_id;
-	ptgt->ptgt_handle = handle;
+	ptgt->ptgt_handle = pd_handle;
 
 	mutex_enter(&sc->sc_ptgt_mtx);
 	/* give ref to the list */
