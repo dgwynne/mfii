@@ -1118,7 +1118,7 @@ mfii_fw_init(struct mfii_softc *sc)
 	iiq->sense_buffer_address_high =
 	    LE_32(MFII_DMA_DVA(sc->sc_sense) >> 32);
 
-	iiq->reply_descriptor_post_queue_address_lo = 
+	iiq->reply_descriptor_post_queue_address_lo =
 	    LE_32(MFII_DMA_DVA(sc->sc_reply_postq));
 	iiq->reply_descriptor_post_queue_address_hi =
 	    LE_32(MFII_DMA_DVA(sc->sc_reply_postq) >> 32);
@@ -1839,12 +1839,12 @@ mfii_sgl(struct mfii_softc *sc, struct mfii_ccb *ccb, void *sglp,
 	u_int space;
 	uint_t i;
 
-        if (ncookies == 0)
-                return (0);
+	if (ncookies == 0)
+		return (0);
 
 	space = (MFII_REQUEST_SIZE - ((uint8_t *)nsge - (uint8_t *)req)) /
-            sizeof(*nsge);
-        if (ncookies > space) {
+	    sizeof(*nsge);
+	if (ncookies > space) {
 		space--;
 
 		ccb->ccb_sgl_len = (ncookies - space) * sizeof(*nsge);
@@ -1865,13 +1865,13 @@ mfii_sgl(struct mfii_softc *sc, struct mfii_ccb *ccb, void *sglp,
 		sge = nsge;
 
 		sge->sg_addr = LE_64(cookies[i].dmac_laddress);
-                sge->sg_len = LE_32(cookies[i].dmac_size);
+		sge->sg_len = LE_32(cookies[i].dmac_size);
 		sge->sg_flags = MFII_SGE_ADDR_SYSTEM;
 
 		nsge = sge + 1;
 
 		datalen += cookies[i].dmac_size;
-        }
+	}
 	sge->sg_flags |= sc->sc_iop->sge_flag_eol;
 
 	if (ccb->ccb_sgl_len > 0) {
@@ -1908,7 +1908,7 @@ mfii_ld_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 
 	cdb = (union scsi_cdb *)pkt->pkt_cdbp;
 	switch (cdb->scc_cmd) {
-        case SCMD_READ:
+	case SCMD_READ:
 	case SCMD_READ_G1:
 	case SCMD_READ_G4:
 	case SCMD_WRITE:
@@ -2152,8 +2152,8 @@ mfii_tran_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
 		dev_err(sc->sc_dev, CE_WARN, "%s: status 0x%x", __func__,
 		    ctx->status);
 		pkt->pkt_reason = CMD_TRAN_ERR;
-                break;
-        }
+		break;
+	}
 
 	pkt->pkt_comp(pkt);
 }
