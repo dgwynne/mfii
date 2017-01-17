@@ -284,6 +284,10 @@ static int		mfii_pd_tgt_insert(struct mfii_softc *, uint64_t,
 static void		mfii_pd_tgt_rele(struct mfii_pd_tgt *);
 static struct mfii_pd_tgt *
 			mfii_pd_tgt_lookup(struct mfii_softc *, const char *);
+static int		mfii_pd_detail(struct mfii_softc *,
+			    struct mfii_ccb *, uint16_t);
+static uint16_t		mfii_pd_dev_handle(struct mfii_softc *,
+			    struct mfii_ccb *, uint16_t);
 
 static inline void
 refcnt_init(struct refcnt *r)
@@ -1008,8 +1012,36 @@ done:
 	return (rv);
 }
 
+static uint16_t
+mfii_pd_dev_handle(struct mfii_softc *sc, struct mfii_ccb *ccb, uint16_t tgt)
+{
+	struct mfii_dmamem *m;
+	struct mfii_ld_map *ldm;
+	uint16_t handle = LE_16(0xffff);;
+	int rv;
+
+	if (tgt >= MFI_MAX_PD)
+		return handle;
+
+	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*ldm),
+	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
+
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_LD_MAP_GET_INFO, NULL, m);
+	if (rv != DDI_SUCCESS)
+		goto done;
+
+	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	ldm = MFII_DMA_KVA(m);
+	handle = ldm->mlm_dev_handle[tgt].mdh_cur_handle;
+
+done:
+	mfii_dmamem_free(sc, m);
+
+	return (handle);
+}
+
 static int
-mfii_pd_probe_one(struct mfii_softc *sc, struct mfii_ccb *ccb, ushort_t tgt)
+mfii_pd_detail(struct mfii_softc *sc, struct mfii_ccb *ccb, uint16_t tgt)
 {
 	struct mfii_dmamem *m;
 	struct mfi_pd_details *pd;
@@ -1042,38 +1074,30 @@ done:
 static int
 mfii_pd_probe(struct mfii_softc *sc)
 {
-	struct mfii_dmamem *ldmm, *pdlm;
-	struct mfii_ld_map *ldm;
+	struct mfii_dmamem *m;
 	struct mfi_pd_list *pdl;
 	struct mfii_ccb *ccb;
-	char name[SCSI_MAXNAMELEN];
-	uint64_t wwpn;
 	int i, n;
 	int rv;
 
-	pdlm = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pdl),
-	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
-	ldmm = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*ldm),
+	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pdl),
 	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
 	ccb = mfii_ccb_get(sc, KM_SLEEP);
 	VERIFY(ccb != NULL);
 
-	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, pdlm);
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, m);
 	if (rv != DDI_SUCCESS)
 		goto done;
 
-	rv = mfii_dcmd(sc, ccb, MR_DCMD_LD_MAP_GET_INFO, NULL, ldmm);
-	if (rv != DDI_SUCCESS)
-		goto done;
-
-	ddi_dma_sync(MFII_DMA_HANDLE(pdlm), 0, 0, DDI_DMA_SYNC_FORKERNEL);
-	ddi_dma_sync(MFII_DMA_HANDLE(ldmm), 0, 0, DDI_DMA_SYNC_FORKERNEL);
-	pdl = MFII_DMA_KVA(pdlm);
-	ldm = MFII_DMA_KVA(ldmm);
+	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	pdl = MFII_DMA_KVA(m);
 
 	n = LE_32(pdl->mpl_no_pd);
 	for (i = 0; i < n; i++) {
 		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
+		char name[SCSI_MAXNAMELEN];
+		uint64_t wwpn;
+		uint16_t target, handle;
 
 #if 0
 		dev_err(sc->sc_dev, CE_NOTE, "id %u enc %u/%u/%u "
@@ -1092,47 +1116,41 @@ mfii_pd_probe(struct mfii_softc *sc)
 		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
 #endif
 
-		if (!ldm->mlm_dev_handle[i].mdh_valid)
-			continue;
+		target = mpa->mpa_pd_id;
 
-#if 0
-		/* only allow access to disks */
-		if (mpa->mpa_scsi_type != DTYPE_DIRECT) {
-			dev_err(sc->sc_dev, CE_NOTE, "skipping");
-			continue;
+		wwpn = LE_64(mpa->mpa_sas_address[0]);
+		if (wwpn == 0) {
+			wwpn = LE_64(mpa->mpa_sas_address[1]);
+			if (wwpn == 0)
+				continue;
 		}
-#endif
 
-		if (mpa->mpa_scsi_type == DTYPE_DIRECT &&
-		    mfii_pd_probe_one(sc, ccb,
-		    LE_16(mpa->mpa_pd_id)) != DDI_SUCCESS)
+		if (mfii_pd_detail(sc, ccb, target) != DDI_SUCCESS)
 			continue;
 
-		/* XXX */
-		if (mpa->mpa_port >= 2)
+		handle = mfii_pd_dev_handle(sc, ccb, target);
+		if (handle == LE_16(0xffff))
 			continue;
-		wwpn = mpa->mpa_sas_address[mpa->mpa_port];
 
 		scsi_wwn_to_wwnstr(wwpn, 1, name);
 
-		if (mfii_pd_tgt_insert(sc, wwpn, mpa->mpa_pd_id,
-		    ldm->mlm_dev_handle[i].mdh_cur_handle) != DDI_SUCCESS) {
+		if (mfii_pd_tgt_insert(sc,
+		    wwpn, target, handle) != DDI_SUCCESS) {
 			dev_err(sc->sc_dev, CE_WARN,
-			    "unable to insert tgt %s", name);
+			    "unable to insert tgt %u %s", LE_16(target), name);
 			continue;
 		}
 
 		if (scsi_hba_tgtmap_tgt_add(sc->sc_pd_map,
 		    SCSI_TGT_SCSI_DEVICE, name, NULL) != DDI_SUCCESS) {
 			dev_err(sc->sc_dev, CE_WARN,
-			    "failed to add %s on p0", name);
+			    "failed to add tgt %u %s", LE_16(target), name);
 		}
 	}
 
 done:
 	mfii_ccb_put(sc, ccb);
-	mfii_dmamem_free(sc, pdlm);
-	mfii_dmamem_free(sc, ldmm);
+	mfii_dmamem_free(sc, m);
 
 	return (rv);
 }
