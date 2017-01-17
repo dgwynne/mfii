@@ -195,6 +195,8 @@ struct mfii_softc {
 
 	ddi_taskq_t		*sc_taskq;
 
+	struct mfii_ccb		*sc_aen_ccb;
+
 	struct mfi_ctrl_info	sc_info;
 };
 
@@ -212,6 +214,19 @@ static struct mfii_dmamem *
 			    ddi_dma_attr_t *, size_t, size_t, uint_t);
 static void		mfii_dmamem_free(struct mfii_softc *,
 			    struct mfii_dmamem *);
+
+static int		mfii_aen_register(struct mfii_softc *);
+static void		mfii_aen_start(struct mfii_softc *,
+			    struct mfii_ccb *, struct mfii_dmamem *, uint32_t);
+static void		mfii_aen_done(struct mfii_softc *,
+			    struct mfii_ccb *);
+static void		mfii_aen_task(void *);
+static void		mfii_aen_pd_inserted(struct mfii_softc *,
+			    struct mfii_ccb *ccb,
+			    const struct mfi_evtarg_pd_address *);
+static void		mfii_aen_pd_removed(struct mfii_softc *,
+			    struct mfii_ccb *ccb,
+			    const struct mfi_evtarg_pd_address *);
 
 static int		mfii_pci_cfg(struct mfii_softc *);
 static int		mfii_fw_transition(struct mfii_softc *);
@@ -654,7 +669,14 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (mfii_hba_attach(sc) != DDI_SUCCESS)
 		goto del_intr;
 
+	if (mfii_aen_register(sc) != DDI_SUCCESS) {
+		cmn_err(CE_WARN, "unable to registers aen");
+		goto hba_detach;
+	}
+
 	return (DDI_SUCCESS);
+hba_detach:
+	mfii_hba_detach(sc);
 del_intr:
 	ddi_remove_intr(sc->sc_dev, 0, sc->sc_iblock_cookie);
 taskq_dtor:
@@ -725,6 +747,135 @@ mfii_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_soft_state_free(mfii_softc_p, instance);
 
 	return (DDI_SUCCESS);
+}
+
+static int
+mfii_aen_register(struct mfii_softc *sc)
+{
+	struct mfii_dmamem *m; /* use this for the counters and event data */
+	struct mfi_evt_log_info *mel;
+	struct mfii_ccb *ccb;
+	uint32_t seq;
+	int rv;
+
+	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*mel),
+	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
+	if (m == NULL)
+		return (DDI_FAILURE);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
+
+	memset(MFII_DMA_KVA(m), 0, MFII_DMA_LEN(m));
+
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_CTRL_EVENT_GET_INFO, NULL, m);
+	if (rv != DDI_SUCCESS)
+		goto freem;
+
+	mel = MFII_DMA_KVA(m);
+	seq = LE_32(mel->mel_boot_seq_num);
+	mfii_dmamem_free(sc, m);
+
+	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1,
+	    sizeof(struct mfi_evt_detail), DDI_DMA_READ | DDI_DMA_CONSISTENT);
+	if (m == NULL)
+		goto freeccb;
+
+	sc->sc_aen_ccb = ccb;
+	mfii_aen_start(sc, ccb, m, seq);
+
+	return (DDI_SUCCESS);
+freem:
+	mfii_dmamem_free(sc, m);
+freeccb:
+	mfii_ccb_put(sc, ccb);
+	return (DDI_FAILURE);
+}
+
+static void
+mfii_aen_start(struct mfii_softc *sc, struct mfii_ccb *ccb,
+    struct mfii_dmamem *m, uint32_t seq)
+{
+	struct mfi_dcmd_frame *dcmd = mfii_dcmd_frame(ccb);
+	struct mfi_frame_header *hdr = &dcmd->mdf_header;
+	union mfi_sgl *sgl = &dcmd->mdf_sgl;
+	union mfi_evt_class_locale mec;
+
+	mfii_dcmd_zero(ccb);
+	memset(MFII_DMA_KVA(m), 0, MFII_DMA_LEN(m));
+
+	ccb->ccb_cookie = m;
+	ccb->ccb_done = mfii_aen_done;
+
+	mec.mec_members.class = MFI_EVT_CLASS_DEBUG;
+	mec.mec_members.reserved = 0;
+	mec.mec_members.locale = LE_16(MFI_EVT_LOCALE_ALL);
+
+	hdr->mfh_cmd = MFI_CMD_DCMD;
+	hdr->mfh_sg_count = 1;
+	hdr->mfh_flags = LE_16(MFI_FRAME_DIR_READ);
+	hdr->mfh_data_len = LE_32(MFII_DMA_LEN(m));
+	hdr->mfh_flags = LE_16(MFI_FRAME_SGL64);
+	dcmd->mdf_opcode = LE_32(MR_DCMD_CTRL_EVENT_WAIT);
+	dcmd->mdf_mbox.w[0] = LE_32(seq);
+	dcmd->mdf_mbox.w[1] = LE_32(mec.mec_word);
+	sgl->sg64[0].addr = LE_64(MFII_DMA_DVA(m));
+	sgl->sg64[0].len = LE_32(MFII_DMA_LEN(m));
+
+	mfii_dcmd_sync(sc, ccb, DDI_DMA_SYNC_FORDEV);
+	mfii_dcmd_start(sc, ccb);
+}
+
+static void
+mfii_aen_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
+{
+	(void)ddi_taskq_dispatch(sc->sc_taskq, mfii_aen_task, sc, DDI_SLEEP);
+}
+
+static void
+mfii_aen_task(void *xsc)
+{
+	struct mfii_softc *sc = xsc;
+	struct mfii_ccb *ccb = sc->sc_aen_ccb;
+	struct mfii_dmamem *m = ccb->ccb_cookie;
+	const struct mfi_evt_detail *med = MFII_DMA_KVA(m);
+	uint32_t seq;
+
+	mfii_dcmd_sync(sc, ccb, DDI_DMA_SYNC_FORKERNEL);
+	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+
+	seq = LE_32(med->med_seq_num);
+	dev_err(sc->sc_dev, CE_NOTE, "%s", med->med_description);
+
+	switch (LE_32(med->med_code)) {
+	case MFI_EVT_PD_INSERTED_EXT:
+		if (med->med_arg_type != MFI_EVT_ARGS_PD_ADDRESS)
+			break;
+
+		mfii_aen_pd_inserted(sc, ccb, &med->args.pd_address);
+		break;
+	case MFI_EVT_PD_REMOVED_EXT:
+		if (med->med_arg_type != MFI_EVT_ARGS_PD_ADDRESS)
+			break;
+
+		mfii_aen_pd_removed(sc, ccb, &med->args.pd_address);
+		break;
+
+	default:
+		break;
+	}
+
+	mfii_aen_start(sc, ccb, m, seq + 1);
+}
+
+static void
+mfii_aen_pd_inserted(struct mfii_softc *sc, struct mfii_ccb *ccb,
+    const struct mfi_evtarg_pd_address *pd)
+{
+}
+
+static void
+mfii_aen_pd_removed(struct mfii_softc *sc, struct mfii_ccb *ccb,
+    const struct mfi_evtarg_pd_address *pd)
+{
 }
 
 static inline int
