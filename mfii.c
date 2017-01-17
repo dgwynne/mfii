@@ -229,6 +229,9 @@ static int		mfii_dcmd(struct mfii_softc *, struct mfii_ccb *,
 			    struct mfii_dmamem *);
 static int		mfii_mfa_poll(struct mfii_softc *, struct mfii_ccb *);
 
+static void		mfii_dcmd_start(struct mfii_softc *,
+			    struct mfii_ccb *);
+
 static int		mfii_hba_attach(struct mfii_softc *);
 static void		mfii_hba_detach(struct mfii_softc *);
 
@@ -298,6 +301,26 @@ static inline int
 refcnt_rele(struct refcnt *r)
 {
 	return (atomic_dec_uint_nv(&r->refs) == 0);
+}
+
+static inline void
+mfii_dcmd_zero(struct mfii_ccb *ccb)
+{
+	memset(ccb->ccb_sense, 0, sizeof(*ccb->ccb_sense));
+}
+
+static inline struct mfi_dcmd_frame *
+mfii_dcmd_frame(struct mfii_ccb *ccb)
+{
+	return ((struct mfi_dcmd_frame *)ccb->ccb_sense);
+}
+
+static inline void
+mfii_dcmd_sync(struct mfii_softc *sc, struct mfii_ccb *ccb, uint_t type)
+{
+	ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_sense),
+	    ccb->ccb_sense_offset, sizeof(*ccb->ccb_sense),
+	    DDI_DMA_SYNC_FORKERNEL);
 }
 
 static ddi_dma_attr_t mfii_req_attr = {
@@ -2009,6 +2032,27 @@ mfii_tran_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
         }
 
 	pkt->pkt_comp(pkt);
+}
+
+static void
+mfii_dcmd_start(struct mfii_softc *sc, struct mfii_ccb *ccb)
+{
+	struct mpii_msg_scsi_io *io = ccb->ccb_request;
+	struct mfii_raid_context *ctx = (struct mfii_raid_context *)(io + 1);
+	struct mfii_sge *sge = (struct mfii_sge *)(ctx + 1);
+
+	memset(ccb->ccb_request, 0, MFII_REQUEST_SIZE);
+	io->function = MFII_FUNCTION_PASSTHRU_IO;
+	io->sgl_offset0 = (uint32_t *)sge - (uint32_t *)io;
+	sge->sg_addr = LE_64(ccb->ccb_sense_dva);
+	sge->sg_len = LE_32(sizeof(*ccb->ccb_sense));
+	sge->sg_flags = MFII_SGE_CHAIN_ELEMENT | MFII_SGE_ADDR_IOCPLBNTA;
+
+	memset(&ccb->ccb_req, 0, sizeof(ccb->ccb_req));
+	ccb->ccb_req.flags = MFII_REQ_TYPE_SCSI;
+	ccb->ccb_req.smid = LE_16(ccb->ccb_smid);
+
+	mfii_start(sc, ccb);
 }
 
 static void
