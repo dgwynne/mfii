@@ -228,7 +228,6 @@ static int		mfii_dcmd(struct mfii_softc *, struct mfii_ccb *,
 			    uint32_t, const union mfi_mbox *,
 			    struct mfii_dmamem *);
 static int		mfii_mfa_poll(struct mfii_softc *, struct mfii_ccb *);
-static void		mfii_done(struct mfii_softc *, struct mfii_ccb *);
 
 static int		mfii_hba_attach(struct mfii_softc *);
 static void		mfii_hba_detach(struct mfii_softc *);
@@ -732,8 +731,12 @@ mfii_intr(caddr_t arg)
 		}
 
 		ccb = &sc->sc_ccbs[LE_16(rdp->smid) - 1];
-		mfii_done(sc, ccb);
 		memset(rdp, 0xff, sizeof(*rdp));
+
+		ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_requests),
+		    ccb->ccb_request_offset, MFII_REQUEST_SIZE,
+		    DDI_DMA_SYNC_FORKERNEL);
+		ccb->ccb_done(sc, ccb);
 
 		if (++sc->sc_reply_postq_index >= sc->sc_reply_postq_depth)
 			sc->sc_reply_postq_index = 0;
@@ -744,16 +747,6 @@ mfii_intr(caddr_t arg)
 		mfii_write(sc, MFII_RPI, sc->sc_reply_postq_index);
 
 	return (DDI_INTR_CLAIMED);
-}
-
-static void
-mfii_done(struct mfii_softc *sc, struct mfii_ccb *ccb)
-{
-	ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_requests),
-	    ccb->ccb_request_offset, MFII_REQUEST_SIZE,
-	    DDI_DMA_SYNC_FORKERNEL);
-
-	ccb->ccb_done(sc, ccb);
 }
 
 static int
