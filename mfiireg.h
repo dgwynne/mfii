@@ -47,7 +47,8 @@
 
 #define MFII_REQ_MFA(_a)	LE_64((_a) | MFII_REQ_TYPE_MFA)
 
-#define MFII_FUNCTION_LDIO_REQUEST (0xf1)
+#define MFII_FUNCTION_PASSTHRU_IO	(0xf0)
+#define MFII_FUNCTION_LDIO_REQUEST	(0xf1)
 
 struct mfii_request_descr {
 	uint8_t		flags;
