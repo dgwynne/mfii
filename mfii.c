@@ -2022,7 +2022,7 @@ static void
 mfii_start(struct mfii_softc *sc, struct mfii_ccb *ccb)
 {
 	u_long *r = (u_long *)&ccb->ccb_req;
- 
+
 	ddi_dma_sync(MFII_DMA_HANDLE(sc->sc_requests),
 	    ccb->ccb_request_offset, MFII_REQUEST_SIZE,
 	    DDI_DMA_SYNC_FORDEV);
