@@ -1220,6 +1220,7 @@ mfii_pd_dev_handle(struct mfii_softc *sc, struct mfii_ccb *ccb, uint16_t tgt)
 	uint16_t handle = LE_16(0xffff);;
 	int rv;
 
+	tgt = LE_16(tgt);
 	if (tgt >= MFI_MAX_PD)
 		return handle;
 
