@@ -253,6 +253,7 @@ static int		mfii_hba_attach(struct mfii_softc *);
 static void		mfii_hba_detach(struct mfii_softc *);
 
 static int		mfii_ld_probe(struct mfii_softc *);
+static int		mfii_pd_probe(struct mfii_softc *);
 
 static int		mfii_iport_attach(dev_info_t *, ddi_attach_cmd_t);
 static int		mfii_iport_detach(dev_info_t *, ddi_detach_cmd_t);
@@ -668,9 +669,6 @@ mfii_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (mfii_hba_attach(sc) != DDI_SUCCESS)
 		goto del_intr;
 
-	if (mfii_ld_probe(sc) != DDI_SUCCESS)
-		cmn_err(CE_WARN, "unable to problem logical disks");
-
 	if (mfii_aen_register(sc) != DDI_SUCCESS) {
 		cmn_err(CE_WARN, "unable to registers aen");
 		goto hba_detach;
@@ -872,9 +870,14 @@ static void
 mfii_aen_pd_inserted(struct mfii_softc *sc, struct mfii_ccb *ccb,
     const struct mfi_evtarg_pd_address *pd)
 {
+	scsi_hba_tgtmap_t *map;
 	char name[SCSI_MAXNAMELEN];
 	uint64_t wwpn;
 	uint16_t target, handle;
+
+	map = sc->sc_pd_map;
+	if (map == NULL)
+		return;
 
 	target = pd->device_id;
 
@@ -903,12 +906,7 @@ mfii_aen_pd_inserted(struct mfii_softc *sc, struct mfii_ccb *ccb,
 		return;
 	}
 
-	if (scsi_hba_tgtmap_tgt_add(sc->sc_pd_map, SCSI_TGT_SCSI_DEVICE,
-	    name, NULL) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN,
-		    "failed to add pd target %u %s", LE_16(target), name);
-		return;
-	}
+	(void)scsi_hba_tgtmap_tgt_add(map, SCSI_TGT_SCSI_DEVICE, name, NULL);
 }
 
 static void
@@ -1274,6 +1272,87 @@ done:
 }
 
 static int
+mfii_pd_probe(struct mfii_softc *sc)
+{
+	struct mfii_dmamem *m;
+	struct mfi_pd_list *pdl;
+	struct mfii_ccb *ccb;
+	int i, n;
+	int rv;
+
+	m = mfii_dmamem_alloc(sc, &mfii_cmd_attr, 1, sizeof(*pdl),
+	    DDI_DMA_READ | DDI_DMA_CONSISTENT);
+	ccb = mfii_ccb_get(sc, KM_SLEEP);
+	VERIFY(ccb != NULL);
+
+	rv = mfii_dcmd(sc, ccb, MR_DCMD_PD_GET_LIST, NULL, m);
+	if (rv != DDI_SUCCESS)
+		goto done;
+
+	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
+	pdl = MFII_DMA_KVA(m);
+
+	n = LE_32(pdl->mpl_no_pd);
+	for (i = 0; i < n; i++) {
+		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
+		char name[SCSI_MAXNAMELEN];
+		uint64_t wwpn;
+		uint16_t target, handle;
+
+#if 0
+		dev_err(sc->sc_dev, CE_NOTE, "id %u enc %u/%u/%u "
+		    "type %d port 0x%x sas %016lx %016lx",
+		    LE_16(mpa->mpa_pd_id), LE_16(mpa->mpa_enc_id),
+		    mpa->mpa_enc_index, mpa->mpa_enc_slot,
+		    mpa->mpa_scsi_type, mpa->mpa_port,
+		    LE_64(mpa->mpa_sas_address[0]),
+		    LE_64(mpa->mpa_sas_address[1]));
+
+		dev_err(sc->sc_dev, CE_NOTE, "cur handle %x valid %x "
+		    "handles %x %x",
+		    LE_16(ldm->mlm_dev_handle[i].mdh_cur_handle),
+		    ldm->mlm_dev_handle[i].mdh_valid,
+		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[0]),
+		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
+#endif
+
+		target = mpa->mpa_pd_id;
+
+		wwpn = LE_64(mpa->mpa_sas_address[0]);
+		if (wwpn == 0) {
+			wwpn = LE_64(mpa->mpa_sas_address[1]);
+			if (wwpn == 0)
+				continue;
+		}
+
+		if (mfii_pd_detail(sc, ccb, target) != DDI_SUCCESS)
+			continue;
+
+		handle = mfii_pd_dev_handle(sc, ccb, target);
+		if (handle == LE_16(0xffff))
+			continue;
+
+		scsi_wwn_to_wwnstr(wwpn, 1, name);
+
+		if (mfii_pd_tgt_insert(sc,
+		    wwpn, target, handle) != DDI_SUCCESS) {
+			dev_err(sc->sc_dev, CE_WARN,
+			    "unable to insert tgt %u %s", LE_16(target), name);
+			continue;
+		}
+
+		(void)scsi_hba_tgtmap_tgt_add(sc->sc_pd_map,
+		    SCSI_TGT_SCSI_DEVICE, name, NULL);
+	}
+
+done:
+	mfii_ccb_put(sc, ccb);
+	mfii_dmamem_free(sc, m);
+
+	return (rv);
+}
+
+static int
 mfii_dcmd(struct mfii_softc *sc, struct mfii_ccb *ccb, uint32_t opc,
     const union mfi_mbox *mbox, struct mfii_dmamem *m)
 {
@@ -1397,6 +1476,7 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 	int instance;
 	const char *addr;
 	scsi_hba_tgtmap_t **map;
+	int (*probe)(struct mfii_softc *) = NULL;
 
 	switch (cmd) {
 	case DDI_ATTACH:
@@ -1422,6 +1502,8 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 		map = &sc->sc_ld_map;
 		tran->tran_tgt_init = mfii_ld_tran_tgt_init;
 		tran->tran_start = mfii_ld_tran_start;
+
+		probe = mfii_ld_probe;
 	} else if (strcmp(addr, "p0") == 0) {
 		map = &sc->sc_pd_map;
 		tran->tran_tgt_init = mfii_pd_tran_tgt_init;
@@ -1431,6 +1513,8 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 		tran->tran_interconnect_type = INTERCONNECT_SAS;
 		/* XXX not sure if this is kosher */
 		tran->tran_hba_flags |= SCSI_HBA_ADDR_COMPLEX;
+
+		probe = mfii_pd_probe;
 	} else
 		return (DDI_FAILURE);
 
@@ -1442,7 +1526,14 @@ mfii_iport_attach(dev_info_t *iport_dip, ddi_attach_cmd_t cmd)
 
 	tran->tran_hba_private = sc;
 
+	if ((*probe)(sc) != DDI_SUCCESS)
+		goto destroy;
+
 	return (DDI_SUCCESS);
+
+destroy:
+	scsi_hba_tgtmap_destroy(*map);
+	return (DDI_FAILURE);
 }
 
 static int
