@@ -1262,7 +1262,7 @@ mfii_pd_detail(struct mfii_softc *sc, struct mfii_ccb *ccb, uint16_t tgt)
 	ddi_dma_sync(MFII_DMA_HANDLE(m), 0, 0, DDI_DMA_SYNC_FORKERNEL);
 	pd = MFII_DMA_KVA(m);
 
-	if (LE_16(pd->mpd_fw_state) != MFI_PD_SYSTEM) {
+	if (pd->mpd_fw_state != LE_16(MFI_PD_SYSTEM)) {
 		rv = DDI_FAILURE;
 		goto done;
 	}
