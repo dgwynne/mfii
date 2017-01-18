@@ -296,6 +296,8 @@ static int		mfii_pd_tran_getcap(struct scsi_address *, char *, int);
 
 static void		mfii_tran_done(struct mfii_softc *, struct mfii_ccb *);
 
+static void		mfii_pd_tgt_add(struct mfii_softc *,
+			    struct mfii_ccb *, uint16_t, const uint64_t *);
 static int		mfii_pd_tgt_insert(struct mfii_softc *, uint64_t,
 			    uint16_t, uint16_t);
 static void		mfii_pd_tgt_rele(struct mfii_pd_tgt *);
@@ -870,43 +872,7 @@ static void
 mfii_aen_pd_inserted(struct mfii_softc *sc, struct mfii_ccb *ccb,
     const struct mfi_evtarg_pd_address *pd)
 {
-	scsi_hba_tgtmap_t *map;
-	char name[SCSI_MAXNAMELEN];
-	uint64_t wwpn;
-	uint16_t target, handle;
-
-	map = sc->sc_pd_map;
-	if (map == NULL)
-		return;
-
-	target = pd->device_id;
-
-	wwpn = LE_64(pd->sas_addr[0]);
-	if (wwpn == 0) {
-		wwpn = LE_64(pd->sas_addr[1]);
-		if (wwpn == 0) {
-			dev_err(sc->sc_dev, CE_WARN,
-			    "no valid wwpn for target %u", LE_16(target));
-			return;
-		}
-	}
-
-	if (mfii_pd_detail(sc, ccb, target) != DDI_SUCCESS)
-		return;
-
-	handle = mfii_pd_dev_handle(sc, ccb, target);
-	if (handle == LE_16(0xffff))
-		return;
-
-	scsi_wwn_to_wwnstr(wwpn, 1, name);
-
-	if (mfii_pd_tgt_insert(sc, wwpn, target, handle) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN,
-		    "unable to insert pd target %u %s", LE_16(target), name);
-		return;
-	}
-
-	(void)scsi_hba_tgtmap_tgt_add(map, SCSI_TGT_SCSI_DEVICE, name, NULL);
+	mfii_pd_tgt_add(sc, ccb, pd->device_id, pd->sas_addr);
 }
 
 static void
@@ -1296,54 +1262,8 @@ mfii_pd_probe(struct mfii_softc *sc)
 	n = LE_32(pdl->mpl_no_pd);
 	for (i = 0; i < n; i++) {
 		struct mfi_pd_address *mpa = &pdl->mpl_address[i];
-		char name[SCSI_MAXNAMELEN];
-		uint64_t wwpn;
-		uint16_t target, handle;
 
-#if 0
-		dev_err(sc->sc_dev, CE_NOTE, "id %u enc %u/%u/%u "
-		    "type %d port 0x%x sas %016lx %016lx",
-		    LE_16(mpa->mpa_pd_id), LE_16(mpa->mpa_enc_id),
-		    mpa->mpa_enc_index, mpa->mpa_enc_slot,
-		    mpa->mpa_scsi_type, mpa->mpa_port,
-		    LE_64(mpa->mpa_sas_address[0]),
-		    LE_64(mpa->mpa_sas_address[1]));
-
-		dev_err(sc->sc_dev, CE_NOTE, "cur handle %x valid %x "
-		    "handles %x %x",
-		    LE_16(ldm->mlm_dev_handle[i].mdh_cur_handle),
-		    ldm->mlm_dev_handle[i].mdh_valid,
-		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[0]),
-		    LE_16(ldm->mlm_dev_handle[i].mdh_handle[1]));
-#endif
-
-		target = mpa->mpa_pd_id;
-
-		wwpn = LE_64(mpa->mpa_sas_address[0]);
-		if (wwpn == 0) {
-			wwpn = LE_64(mpa->mpa_sas_address[1]);
-			if (wwpn == 0)
-				continue;
-		}
-
-		if (mfii_pd_detail(sc, ccb, target) != DDI_SUCCESS)
-			continue;
-
-		handle = mfii_pd_dev_handle(sc, ccb, target);
-		if (handle == LE_16(0xffff))
-			continue;
-
-		scsi_wwn_to_wwnstr(wwpn, 1, name);
-
-		if (mfii_pd_tgt_insert(sc,
-		    wwpn, target, handle) != DDI_SUCCESS) {
-			dev_err(sc->sc_dev, CE_WARN,
-			    "unable to insert tgt %u %s", LE_16(target), name);
-			continue;
-		}
-
-		(void)scsi_hba_tgtmap_tgt_add(sc->sc_pd_map,
-		    SCSI_TGT_SCSI_DEVICE, name, NULL);
+		mfii_pd_tgt_add(sc, ccb, mpa->mpa_pd_id, mpa->mpa_sas_address);
 	}
 
 done:
@@ -1351,6 +1271,44 @@ done:
 	mfii_dmamem_free(sc, m);
 
 	return (rv);
+}
+
+static void
+mfii_pd_tgt_add(struct mfii_softc *sc, struct mfii_ccb *ccb,
+    uint16_t target, const uint64_t *sas_addrs)
+{
+	uint64_t wwpn;
+	scsi_hba_tgtmap_t *map;
+	char name[SCSI_MAXNAMELEN];
+	uint16_t handle;
+
+	map = sc->sc_pd_map;
+	if (map == NULL)
+		return;
+
+	wwpn = LE_64(sas_addrs[0]);
+	if (wwpn == 0) {
+		wwpn = LE_64(sas_addrs[1]);
+		if (wwpn == 0)
+			return;
+	}
+
+	if (mfii_pd_detail(sc, ccb, target) != DDI_SUCCESS)
+		return;
+
+	handle = mfii_pd_dev_handle(sc, ccb, target);
+	if (handle == LE_16(0xffff))
+		return;
+
+	scsi_wwn_to_wwnstr(wwpn, 1, name);
+
+	if (mfii_pd_tgt_insert(sc, wwpn, target, handle) != DDI_SUCCESS) {
+		dev_err(sc->sc_dev, CE_WARN,
+		    "unable to insert pd target %u %s", LE_16(target), name);
+		return;
+	}
+
+	(void)scsi_hba_tgtmap_tgt_add(map, SCSI_TGT_SCSI_DEVICE, name, NULL);
 }
 
 static int
