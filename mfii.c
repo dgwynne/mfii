@@ -1302,11 +1302,8 @@ mfii_pd_tgt_add(struct mfii_softc *sc, struct mfii_ccb *ccb,
 
 	scsi_wwn_to_wwnstr(wwpn, 1, name);
 
-	if (mfii_pd_tgt_insert(sc, wwpn, target, handle) != DDI_SUCCESS) {
-		dev_err(sc->sc_dev, CE_WARN,
-		    "unable to insert pd target %u %s", LE_16(target), name);
+	if (mfii_pd_tgt_insert(sc, wwpn, target, handle) != DDI_SUCCESS)
 		return;
-	}
 
 	(void)scsi_hba_tgtmap_tgt_add(map, SCSI_TGT_SCSI_DEVICE, name, NULL);
 }
@@ -1649,6 +1646,7 @@ mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
     uint16_t pd_id, uint16_t pd_handle)
 {
 	struct mfii_pd_tgt *ptgt;
+	struct mfii_pd_tgt *optgt;
 
 	ptgt = kmem_zalloc(sizeof(*ptgt), KM_SLEEP);
 
@@ -1658,9 +1656,22 @@ mfii_pd_tgt_insert(struct mfii_softc *sc, uint64_t wwpn,
 	ptgt->ptgt_handle = pd_handle;
 
 	mutex_enter(&sc->sc_ptgt_mtx);
-	/* give ref to the list */
-	TAILQ_INSERT_TAIL(&sc->sc_ptgt_list, ptgt, ptgt_entry);
+	TAILQ_FOREACH(optgt, &sc->sc_ptgt_list, ptgt_entry) {
+		if (ptgt->ptgt_id == optgt->ptgt_id)
+			break;
+	}
+
+	/* existing target wasnt found */
+	if (optgt == NULL) {
+		/* give ref to the list */
+		TAILQ_INSERT_TAIL(&sc->sc_ptgt_list, ptgt, ptgt_entry);
+	}
 	mutex_exit(&sc->sc_ptgt_mtx);
+
+	if (optgt != NULL) {
+		kmem_free(ptgt, sizeof(*ptgt));
+		return (DDI_FAILURE);
+	}
 
 	return (DDI_SUCCESS);
 }
