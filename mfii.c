@@ -813,9 +813,8 @@ mfii_aen_start(struct mfii_softc *sc, struct mfii_ccb *ccb,
 
 	hdr->mfh_cmd = MFI_CMD_DCMD;
 	hdr->mfh_sg_count = 1;
-	hdr->mfh_flags = LE_16(MFI_FRAME_DIR_READ);
+	hdr->mfh_flags = LE_16(MFI_FRAME_DIR_READ | MFI_FRAME_SGL64);
 	hdr->mfh_data_len = LE_32(MFII_DMA_LEN(m));
-	hdr->mfh_flags = LE_16(MFI_FRAME_SGL64);
 	dcmd->mdf_opcode = LE_32(MR_DCMD_CTRL_EVENT_WAIT);
 	dcmd->mdf_mbox.w[0] = LE_32(seq);
 	dcmd->mdf_mbox.w[1] = LE_32(mec.mec_word);
