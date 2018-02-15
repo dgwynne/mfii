@@ -2229,6 +2229,7 @@ mfii_dcmd_start(struct mfii_softc *sc, struct mfii_ccb *ccb)
 	memset(ccb->ccb_request, 0, MFII_REQUEST_SIZE);
 	io->function = MFII_FUNCTION_PASSTHRU_IO;
 	io->sgl_offset0 = (uint32_t *)sge - (uint32_t *)io;
+	io->chain_offset = io->sgl_offset0 / 4;
 	sge->sg_addr = LE_64(ccb->ccb_sense_dva);
 	sge->sg_len = LE_32(sizeof(*ccb->ccb_sense));
 	sge->sg_flags = MFII_SGE_CHAIN_ELEMENT | MFII_SGE_ADDR_IOCPLBNTA;
